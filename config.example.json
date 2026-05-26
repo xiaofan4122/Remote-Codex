@@ -1,0 +1,13 @@
+{
+  "codex": {
+    "defaultCwd": ""
+  },
+  "remoteControl": {
+    "responseSource": "visual_terminal"
+  },
+  "plugins": {
+    "feishu": {
+      "enabled": false
+    }
+  }
+}

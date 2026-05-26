@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+    />
+    <title>Remote Codex</title>
+    <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="toolbar">
+      <div class="title">
+        <span class="mark"></span>
+        <div>
+          <h1>Remote Codex</h1>
+          <p id="cwd">Starting...</p>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="chooseDir" type="button">Open Project</button>
+        <button id="restart" type="button">Restart Codex</button>
+        <button id="settings" type="button">Settings</button>
+      </div>
+    </header>
+
+    <main id="terminalShell">
+      <section id="terminal"></section>
+      <aside id="terminalScrollbar" aria-label="Terminal scrollback">
+        <div id="terminalScrollSpacer"></div>
+      </aside>
+    </main>
+
+    <aside id="settingsPanel" class="settings-panel" aria-hidden="true">
+      <form id="settingsForm" class="settings-dialog">
+        <header class="settings-header">
+          <div>
+            <h2>Settings</h2>
+          </div>
+          <button id="closeSettings" type="button">Close</button>
+        </header>
+
+        <div class="settings-content">
+          <section class="settings-section">
+            <h3>Codex</h3>
+            <label>
+              Default working directory
+              <input id="codexDefaultCwd" name="codexDefaultCwd" type="text" autocomplete="off" />
+            </label>
+          </section>
+
+          <section class="settings-section">
+            <h3>Feishu</h3>
+            <div class="connect-box">
+              <div class="connect-copy">
+                <strong>Connection</strong>
+                <span id="feishuConnectState">Not connected.</span>
+              </div>
+              <div class="connect-actions">
+                <button id="connectFeishu" type="button">Connect Feishu</button>
+                <button id="openFeishuConnect" type="button" disabled>Open Link</button>
+                <button id="cancelFeishuConnect" type="button" disabled>Cancel</button>
+              </div>
+              <img id="feishuConnectQr" alt="" hidden />
+              <p id="feishuConnectLink"></p>
+            </div>
+          </section>
+        </div>
+
+        <footer class="settings-footer">
+          <span id="settingsStatus" role="status"></span>
+          <div>
+            <button type="submit">Save</button>
+          </div>
+        </footer>
+      </form>
+    </aside>
+
+    <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
+    <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

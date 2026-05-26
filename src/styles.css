@@ -1,0 +1,384 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  width: 100%;
+  max-width: 100vw;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
+  background: #111418;
+  color: #e8edf2;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+.toolbar {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 20px;
+  width: 100%;
+  max-width: 100vw;
+  min-height: 68px;
+  min-width: 0;
+  padding: 12px 16px;
+  overflow: hidden;
+  border-bottom: 1px solid #27313d;
+  background: #181d23;
+}
+
+.title {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  gap: 12px;
+}
+
+.title > div {
+  min-width: 0;
+}
+
+.mark {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #6ee7b7;
+  box-shadow: 0 0 0 5px rgba(110, 231, 183, 0.12);
+}
+
+h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+p {
+  max-width: 100%;
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: #9aa8b8;
+  font-size: 12px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions {
+  display: flex;
+  min-width: max-content;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+button {
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid #3a4656;
+  border-radius: 6px;
+  background: #222a33;
+  color: #e8edf2;
+  font: inherit;
+  font-size: 13px;
+}
+
+button:hover {
+  background: #2c3642;
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid #3a4656;
+  border-radius: 6px;
+  background: #111418;
+  color: #e8edf2;
+  font: inherit;
+  font-size: 13px;
+}
+
+input,
+select {
+  height: 34px;
+  padding: 0 10px;
+}
+
+textarea {
+  min-height: 76px;
+  padding: 9px 10px;
+  resize: vertical;
+}
+
+#terminalShell {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 14px;
+  column-gap: 4px;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  max-width: 100vw;
+  overflow: hidden;
+  padding: 10px;
+}
+
+#terminal {
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+#terminalScrollbar {
+  min-height: 0;
+  width: 14px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-left: 1px solid #27313d;
+  background: #0f1318;
+  scrollbar-color: #526173 #0f1318;
+  scrollbar-width: thin;
+}
+
+#terminalScrollbar::-webkit-scrollbar {
+  width: 12px;
+}
+
+#terminalScrollbar::-webkit-scrollbar-track {
+  background: #0f1318;
+}
+
+#terminalScrollbar::-webkit-scrollbar-thumb {
+  border: 2px solid #0f1318;
+  border-radius: 8px;
+  background: #526173;
+}
+
+#terminalScrollSpacer {
+  width: 1px;
+  min-height: 100%;
+}
+
+.xterm {
+  height: 100%;
+  width: 100%;
+  max-width: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.xterm .xterm-viewport {
+  overflow-y: hidden !important;
+  scrollbar-width: none;
+  background: #111418 !important;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar {
+  display: none;
+}
+
+.xterm .xterm-screen {
+  z-index: 1;
+}
+
+.settings-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: stretch end;
+  background: rgba(5, 8, 12, 0.64);
+}
+
+.settings-panel[aria-hidden="true"] {
+  display: none;
+}
+
+.settings-dialog {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  width: min(560px, 100vw);
+  height: 100%;
+  min-width: 0;
+  border-left: 1px solid #27313d;
+  background: #181d23;
+  box-shadow: -24px 0 48px rgba(0, 0, 0, 0.28);
+}
+
+.settings-header,
+.settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #27313d;
+}
+
+.settings-footer {
+  border-top: 1px solid #27313d;
+  border-bottom: 0;
+}
+
+.settings-header h2,
+.settings-section h3 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.settings-content {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.settings-section {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.settings-section h3,
+.settings-section label:has(textarea),
+.settings-section .check-row,
+.connect-box {
+  grid-column: 1 / -1;
+}
+
+.settings-section label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: #9aa8b8;
+  font-size: 12px;
+}
+
+.settings-section .check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.check-row input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+#settingsStatus {
+  min-width: 0;
+  overflow: hidden;
+  color: #9aa8b8;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-footer > div {
+  display: flex;
+  gap: 8px;
+}
+
+.connect-box {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #27313d;
+  border-radius: 6px;
+  background: #14191f;
+}
+
+.connect-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.connect-copy strong {
+  font-size: 13px;
+}
+
+.connect-copy span {
+  overflow: hidden;
+  color: #9aa8b8;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connect-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.connect-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+#feishuConnectQr {
+  grid-column: 1 / -1;
+  width: 160px;
+  height: 160px;
+  border: 8px solid #ffffff;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+#feishuConnectLink {
+  grid-column: 1 / -1;
+  white-space: nowrap;
+}
+
+@media (max-width: 620px) {
+  .toolbar {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .actions {
+    width: 100%;
+    justify-content: flex-start;
+    min-width: 0;
+  }
+
+  .settings-section {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .connect-box {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .connect-actions {
+    flex-wrap: wrap;
+  }
+}
