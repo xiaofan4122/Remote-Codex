@@ -284,6 +284,17 @@ textarea {
   gap: 8px;
 }
 
+.settings-section .check-row label {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.settings-section .check-row button {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
 .check-row input {
   width: 16px;
   height: 16px;

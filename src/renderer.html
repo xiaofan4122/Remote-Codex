@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -17,19 +17,19 @@
         <span class="mark"></span>
         <div>
           <h1>Remote Codex</h1>
-          <p id="cwd">Starting...</p>
+          <p id="cwd">启动中...</p>
         </div>
       </div>
       <div class="actions">
-        <button id="chooseDir" type="button">Open Project</button>
-        <button id="restart" type="button">Restart Codex</button>
-        <button id="settings" type="button">Settings</button>
+        <button id="chooseDir" type="button" data-i18n="openProject">打开项目</button>
+        <button id="restart" type="button" data-i18n="restartCodex">重启 Codex</button>
+        <button id="settings" type="button" data-i18n="settings">设置</button>
       </div>
     </header>
 
     <main id="terminalShell">
       <section id="terminal"></section>
-      <aside id="terminalScrollbar" aria-label="Terminal scrollback">
+      <aside id="terminalScrollbar" aria-label="终端滚动历史">
         <div id="terminalScrollSpacer"></div>
       </aside>
     </main>
@@ -38,31 +38,47 @@
       <form id="settingsForm" class="settings-dialog">
         <header class="settings-header">
           <div>
-            <h2>Settings</h2>
+            <h2 data-i18n="settings">设置</h2>
           </div>
-          <button id="closeSettings" type="button">Close</button>
+          <button id="closeSettings" type="button" data-i18n="close">关闭</button>
         </header>
 
         <div class="settings-content">
           <section class="settings-section">
+            <h3 data-i18n="interface">界面</h3>
+            <label>
+              <span data-i18n="language">语言</span>
+              <select id="uiLanguage" name="uiLanguage">
+                <option value="zh-CN" data-i18n="languageChinese">中文</option>
+                <option value="en" data-i18n="languageEnglish">English</option>
+              </select>
+            </label>
+          </section>
+
+          <section class="settings-section">
             <h3>Codex</h3>
             <label>
-              Default working directory
+              <span data-i18n="defaultWorkingDirectory">默认工作目录</span>
               <input id="codexDefaultCwd" name="codexDefaultCwd" type="text" autocomplete="off" />
             </label>
+            <div class="check-row">
+              <input id="rawOutputLogEnabled" name="rawOutputLogEnabled" type="checkbox" />
+              <label for="rawOutputLogEnabled" data-i18n="rawOutputLogEnabled">记录 Codex 原始输出</label>
+              <button id="openRawOutputLog" type="button" data-i18n="openLog">打开日志</button>
+            </div>
           </section>
 
           <section class="settings-section">
             <h3>Feishu</h3>
             <div class="connect-box">
               <div class="connect-copy">
-                <strong>Connection</strong>
-                <span id="feishuConnectState">Not connected.</span>
+                <strong data-i18n="connection">连接</strong>
+                <span id="feishuConnectState">未连接。</span>
               </div>
               <div class="connect-actions">
-                <button id="connectFeishu" type="button">Connect Feishu</button>
-                <button id="openFeishuConnect" type="button" disabled>Open Link</button>
-                <button id="cancelFeishuConnect" type="button" disabled>Cancel</button>
+                <button id="connectFeishu" type="button">连接飞书</button>
+                <button id="openFeishuConnect" type="button" disabled data-i18n="openLink">打开链接</button>
+                <button id="cancelFeishuConnect" type="button" disabled data-i18n="cancel">取消</button>
               </div>
               <img id="feishuConnectQr" alt="" hidden />
               <p id="feishuConnectLink"></p>
@@ -73,7 +89,7 @@
         <footer class="settings-footer">
           <span id="settingsStatus" role="status"></span>
           <div>
-            <button type="submit">Save</button>
+            <button type="submit" data-i18n="save">保存</button>
           </div>
         </footer>
       </form>

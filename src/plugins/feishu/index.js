@@ -6,6 +6,18 @@ const FEISHU_EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000;
 const FEISHU_EVENT_DEDUPE_MAX_ENTRIES = 1000;
 const FEISHU_API_BASE = 'https://open.feishu.cn/open-apis';
 const STREAM_CONTENT_ELEMENT_ID = 'content';
+const CARD_COLORS = {
+  approval: 'orange',
+  command: 'blue',
+  error: 'red',
+  info: 'blue',
+  muted: 'grey',
+  progress: 'blue',
+  reply: 'green',
+  running: 'orange',
+  success: 'green',
+  warning: 'orange'
+};
 
 module.exports = {
   id: 'feishu',
@@ -159,14 +171,22 @@ class FeishuPlugin {
           text: replyText
         });
       },
-      createReplyStream: async ({ title, initialText } = {}) => {
+      replyPanel: async (panel) => {
+        await this.sendPanel({
+          receiveId: message.chatId,
+          receiveIdType: 'chat_id',
+          panel
+        });
+      },
+      createReplyStream: async ({ title, initialText, controlMode } = {}) => {
         if (!this.pluginConfig.streaming) return null;
         if (this.pluginConfig.mode !== 'long_connection') return null;
         return this.createReplyStream({
           receiveId: message.chatId,
           receiveIdType: 'chat_id',
           title: title || 'Remote Codex',
-          initialText: initialText || 'Generating...'
+          initialText: initialText || 'Generating...',
+          controlMode
         });
       }
     });
@@ -213,7 +233,7 @@ class FeishuPlugin {
       operatorOpenId: action.operatorOpenId,
       action: action.remoteAction
     });
-    const actionEventId = action.messageId
+    const actionEventId = shouldDedupeCardAction(action.remoteAction) && action.messageId
       ? `card:${action.messageId}:${action.operatorOpenId}:${action.remoteAction}`
       : '';
     if (this.isDuplicateEvent(actionEventId)) {
@@ -259,6 +279,14 @@ class FeishuPlugin {
             receiveId: action.chatId,
             receiveIdType: 'chat_id',
             text: replyText
+          });
+        },
+        replyPanel: async (panel) => {
+          if (!action.chatId) return;
+          await this.sendPanel({
+            receiveId: action.chatId,
+            receiveIdType: 'chat_id',
+            panel
           });
         }
       });
@@ -370,6 +398,61 @@ class FeishuPlugin {
     }
   }
 
+  async sendPanel({ receiveId, receiveIdType = 'chat_id', panel }) {
+    const enrichedPanel = {
+      ...panel,
+      transport: {
+        plugin: 'feishu',
+        mode: this.pluginConfig.mode,
+        startedAt: this.startedAt,
+        websocket: Boolean(this.wsClient)
+      }
+    };
+    const fallbackText = panel?.fallbackText || buildPanelFallbackText(enrichedPanel);
+
+    try {
+      await this.sendPanelCard({ receiveId, receiveIdType, panel: enrichedPanel });
+    } catch (error) {
+      await this.applyMissingScopesIfNeeded(error);
+      this.logger.warn?.('Feishu panel card send failed, falling back to text:', error.message);
+      await this.sendText({ receiveId, receiveIdType, text: fallbackText });
+    }
+  }
+
+  async sendPanelCard({ receiveId, receiveIdType = 'chat_id', panel }) {
+    const card = buildPanelCard(panel);
+    this.logger.event?.('feishu.panel.send', {
+      receiveId,
+      receiveIdType,
+      kind: panel?.kind || '',
+      text: clipForLog(panel?.fallbackText || buildPanelFallbackText(panel))
+    });
+
+    if (this.pluginConfig.mode === 'custom_webhook') {
+      await sendCustomWebhookCard({
+        webhookUrl: this.pluginConfig.customWebhookUrl,
+        secret: this.pluginConfig.customWebhookSecret,
+        card
+      });
+      return;
+    }
+
+    if (!receiveId) {
+      throw new Error('Feishu receive id is required.');
+    }
+
+    const client = this.client || new (requireLarkSdk().Client)({
+      appId: this.pluginConfig.appId,
+      appSecret: this.pluginConfig.appSecret
+    });
+
+    await sendAppCard(client, {
+      receiveId,
+      receiveIdType,
+      card
+    });
+  }
+
   async sendCard({ receiveId, receiveIdType = 'chat_id', text }) {
     const chunks = splitMessage(text, FEISHU_CARD_CHUNK_CHARS);
     this.logger.event?.('feishu.card.send', {
@@ -412,7 +495,8 @@ class FeishuPlugin {
     receiveId,
     receiveIdType = 'chat_id',
     title = 'Remote Codex',
-    initialText = ''
+    initialText = '',
+    controlMode = 'default'
   }) {
     if (!receiveId) {
       throw new Error('Feishu receive id is required.');
@@ -420,7 +504,7 @@ class FeishuPlugin {
 
     let created;
     try {
-      const card = buildStreamingCard({ title, initialText });
+      const card = buildStreamingCard({ title, initialText, controlMode });
       created = await this.cardkitRequest('/cardkit/v1/cards', {
         method: 'POST',
         body: {
@@ -688,11 +772,32 @@ function normalizeCardAction(data) {
 function normalizeRemoteAction(action) {
   const value = String(action || '').toLowerCase();
   if (['approve', 'allow', 'yes', 'y'].includes(value)) return 'approve';
+  if (
+    [
+      'approve_persistent',
+      'approve-always',
+      'always',
+      'persist',
+      'persistent',
+      'p'
+    ].includes(value)
+  ) {
+    return 'approve_persistent';
+  }
   if (['deny', 'reject', 'no', 'n', 'cancel', 'escape', 'esc'].includes(value)) {
     return 'deny';
   }
   if (['enter', 'up', 'down', 'left', 'right', 'tab'].includes(value)) return value;
+  if (['resume', 'status', 'permission', 'permissions', 'tail', 'stop', 'help', 'commands', 'menu'].includes(value)) {
+    return value === 'permissions' ? 'permission' : value;
+  }
   return '';
+}
+
+function shouldDedupeCardAction(action) {
+  return ['approve', 'approve_persistent', 'deny', 'enter'].includes(
+    String(action || '').toLowerCase()
+  );
 }
 
 function parseJsonObject(value) {
@@ -867,7 +972,178 @@ function buildReplyCard(text, index = 0, total = 1) {
   };
 }
 
-function buildStreamingCard({ title, initialText }) {
+function buildPanelCard(panel = {}) {
+  const actions = buildPanelActions(panel);
+  const elements = [
+    {
+      tag: 'markdown',
+      content: formatCardMarkdown(buildPanelMarkdown(panel))
+    }
+  ];
+
+  if (actions.length > 0) {
+    elements.push({
+      tag: 'action',
+      actions
+    });
+  }
+
+  return {
+    config: {
+      wide_screen_mode: true,
+      enable_forward: true
+    },
+    header: {
+      template: getPanelTemplate(panel),
+      title: {
+        tag: 'plain_text',
+        content: panel.title || 'Remote Codex'
+      }
+    },
+    elements
+  };
+}
+
+function getPanelTemplate(panel = {}) {
+  if (panel.kind === 'permission' && panel.active) return 'orange';
+  if (panel.kind === 'permission') return 'grey';
+  if (panel.kind === 'status' && panel.running) return 'green';
+  if (panel.kind === 'status') return 'grey';
+  return 'blue';
+}
+
+function buildPanelMarkdown(panel = {}) {
+  if (panel.kind === 'status') return buildStatusPanelMarkdown(panel);
+  if (panel.kind === 'permission') return buildPermissionPanelMarkdown(panel);
+  if (panel.kind === 'commands') return buildCommandPanelMarkdown(panel);
+  return panel.fallbackText || 'Remote Codex';
+}
+
+function buildStatusPanelMarkdown(panel = {}) {
+  const lines = ['**状态**'];
+  if (panel.notice) lines.push(`- ${panel.notice}`);
+
+  if (!panel.attached || !panel.session) {
+    lines.push(`- ${colorCardText('未接入会话', CARD_COLORS.warning)}`);
+    lines.push('- 发送 `/start` 可启动会话；`/resume` 会打开 Codex 原生历史会话列表。');
+    lines.push('', '**快捷命令**', '- `/start` 启动会话', '- `/resume` 历史会话列表', '- `/permission` 权限面板', '- `/status` Codex 状态');
+    return lines.join('\n');
+  }
+
+  const session = panel.session || {};
+  const outputMode = panel.config?.sendOutput ? panel.config?.outputMode : 'silent';
+  lines.push(
+    `- 运行: ${panel.running ? colorCardText('运行中', CARD_COLORS.success) : colorCardText('未运行', CARD_COLORS.muted)}`,
+    `- 模式: ${inlineCode(panel.source || 'visual_terminal')}`,
+    `- 工作目录: ${inlineCode(session.cwd || 'unknown')}`,
+    `- 输出: ${inlineCode(outputMode || 'final')}`,
+    `- 原始日志: ${panel.config?.rawOutputLogEnabled ? colorCardText('开启', CARD_COLORS.success) : colorCardText('关闭', CARD_COLORS.muted)}`,
+    `- 飞书长连接: ${panel.transport?.websocket ? colorCardText('已启动', CARD_COLORS.success) : colorCardText('未启动', CARD_COLORS.warning)}`
+  );
+  if (session.id) lines.push(`- 会话: ${inlineCode(session.id)}`);
+  if (session.cursor !== undefined) lines.push(`- 游标: ${inlineCode(session.cursor)}`);
+  if (session.createdAt) lines.push(`- 创建: ${inlineCode(session.createdAt)}`);
+  if (panel.lastInputText) {
+    lines.push(`- 最近输入: ${inlineCode(clipForCard(panel.lastInputText, 120))}`);
+  }
+
+  lines.push('', '**快捷命令**', '- `/resume` 历史会话列表', '- `/permission` 权限面板', '- `/status` Codex 状态', '- `/tail` 最近输出', '- `/stop` 停止远程会话');
+  return lines.join('\n');
+}
+
+function buildPermissionPanelMarkdown(panel = {}) {
+  const lines = ['**权限**'];
+  if (!panel.attached) {
+    lines.push(`- ${panel.message || '当前没有接入会话。'}`);
+    lines.push('- 发送 `/resume` 可接入当前可视化 Codex 会话。');
+    return lines.join('\n');
+  }
+
+  if (panel.active) {
+    if (panel.progressText) {
+      lines.push('', panel.progressText);
+    } else {
+      lines.push(`- ${panel.message || 'Codex 正在等待权限确认。'}`);
+    }
+    lines.push('', '可以点击下方按钮，或发送 `/approve`、`/always`、`/deny`。');
+    return lines.join('\n');
+  }
+
+  lines.push(`- ${panel.message || '当前没有待处理的权限请求。'}`);
+  if (panel.progressText) lines.push('', panel.progressText);
+  lines.push('', '- `/status` 查看当前会话状态');
+  return lines.join('\n');
+}
+
+function buildCommandPanelMarkdown(panel = {}) {
+  return [
+    '**快捷命令**',
+    panel.attached
+      ? '- 已接入 Remote Codex 会话。'
+      : '- 当前还没有接入会话，先使用 `/start`。',
+    '',
+    '- `/resume` 打开 Codex 原生历史会话列表',
+    '- `/permission` 打开 Codex 原生权限面板',
+    '- `/status` 打开 Codex 原生状态面板',
+    '- `/tail` 查看最近输出',
+    '- `/stop` 停止远程会话',
+    '- `/remote-status` 查看 Remote Codex 自身状态'
+  ].join('\n');
+}
+
+function buildPanelActions(panel = {}) {
+  const actions = Array.isArray(panel.actions) ? panel.actions : [];
+  return actions
+    .map((action) => buildPanelActionButton(action))
+    .filter(Boolean)
+    .slice(0, 6);
+}
+
+function buildPanelActionButton(action) {
+  const value = String(action || '').toLowerCase();
+  const option = {
+    approve: ['允许一次', 'approve', 'primary'],
+    approve_persistent: ['总是允许', 'approve_persistent', 'default'],
+    deny: ['拒绝', 'deny', 'danger'],
+    resume: ['历史会话', 'resume', 'primary'],
+    permission: ['权限', 'permission', 'default'],
+    status: ['状态', 'status', 'default'],
+    tail: ['最近输出', 'tail', 'default'],
+    stop: ['停止', 'stop', 'danger'],
+    up: ['上移', 'up', 'default'],
+    down: ['下移', 'down', 'default'],
+    enter: ['确认', 'enter', 'primary'],
+    help: ['帮助', 'help', 'default'],
+    commands: ['快捷命令', 'commands', 'default']
+  }[value];
+  if (!option) return null;
+  return buildControlButton(option[0], option[1], option[2]);
+}
+
+function buildPanelFallbackText(panel = {}) {
+  return stripCardMarkup(buildPanelMarkdown(panel));
+}
+
+function stripCardMarkup(text) {
+  return String(text || '')
+    .replace(/<font\s+color='[^']+'>/g, '')
+    .replace(/<\/font>/g, '')
+    .replace(/\*\*/g, '')
+    .trim();
+}
+
+function inlineCode(value) {
+  const text = String(value || '').replace(/`/g, "'");
+  return `\`${text}\``;
+}
+
+function clipForCard(text, max) {
+  const value = String(text || '');
+  if (value.length <= max) return value;
+  return `${value.slice(0, max - 3)}...`;
+}
+
+function buildStreamingCard({ title, initialText, controlMode = 'default' }) {
   return {
     schema: '2.0',
     config: {
@@ -908,17 +1184,28 @@ function buildStreamingCard({ title, initialText }) {
         },
         {
           tag: 'action',
-          actions: buildControlButtons()
+          actions: buildControlButtons(controlMode)
         }
       ]
     }
   };
 }
 
-function buildControlButtons() {
+function buildControlButtons(controlMode = 'default') {
+  if (controlMode === 'navigation') {
+    return [
+      buildControlButton('Up', 'up', 'default'),
+      buildControlButton('Down', 'down', 'default'),
+      buildControlButton('Enter', 'enter', 'primary'),
+      buildControlButton('Esc', 'deny', 'default'),
+      buildControlButton('Status', 'status', 'default')
+    ];
+  }
+
   return [
-    buildControlButton('Approve', 'approve', 'primary'),
-    buildControlButton('Deny', 'deny', 'default'),
+    buildControlButton('Yes', 'approve', 'primary'),
+    buildControlButton('Always', 'approve_persistent', 'default'),
+    buildControlButton('No', 'deny', 'default'),
     buildControlButton('Up', 'up', 'default'),
     buildControlButton('Down', 'down', 'default')
   ];
@@ -952,25 +1239,86 @@ function formatCardMarkdown(text, options = {}) {
 }
 
 function enhanceCodexMarkdown(text) {
+  let inCodeBlock = false;
+
   return String(text || '')
     .split('\n')
     .map((line) => {
       const value = line.trimEnd();
       const compact = value.trim();
-      if (/^⚠/.test(compact)) return `> ${escapeMarkdownLine(compact)}`;
-      if (/^Ran\b/.test(compact)) return `**${escapeMarkdownLine(compact)}**`;
-      if (/^Explored\b/.test(compact)) return `**${escapeMarkdownLine(compact)}**`;
-      if (/^(?:Read|Edited|Updated|Created|Deleted|Checked|Applied)\b/.test(compact)) {
-        return `- ${escapeMarkdownLine(compact)}`;
+      if (/^\s*```/.test(compact)) {
+        inCodeBlock = !inCodeBlock;
+        return value;
       }
-      if (/^└\s+/.test(compact)) return `> ${escapeMarkdownLine(compact)}`;
+      if (inCodeBlock || !compact) return value;
+      if (/^\*\*等待确认\*\*$/.test(compact)) {
+        return colorCardText('**等待确认**', CARD_COLORS.approval);
+      }
+      if (/^\*\*进度\*\*$/.test(compact)) {
+        return colorCardText('**进度**', CARD_COLORS.progress);
+      }
+      if (/^\*\*回复\*\*$/.test(compact)) {
+        return colorCardText('**回复**', CARD_COLORS.reply);
+      }
+      if (/^\*\*选项\*\*$/.test(compact)) {
+        return colorCardText('**选项**', CARD_COLORS.info);
+      }
+      if (/^\*\*(?:Codex 状态|剩余用量|运行信息)\*\*$/.test(compact)) {
+        return colorCardText(compact, CARD_COLORS.info);
+      }
+      if (/^⚠/.test(compact)) return `> ${colorCardText(compact, CARD_COLORS.warning)}`;
+      if (/^-\s+(?:5 小时额度|每周额度):/.test(compact)) {
+        return colorCardText(
+          compact,
+          compact.includes('低余量') ? CARD_COLORS.warning : CARD_COLORS.success
+        );
+      }
+      if (/^(?:Error|Failed|Failure|Denied|Rejected)\b/i.test(compact)) {
+        return colorCardText(compact, CARD_COLORS.error);
+      }
+      if (/^-\s+(?:Error|Failed|Failure|Denied|Rejected)\b/i.test(compact)) {
+        return colorCardText(compact, CARD_COLORS.error);
+      }
+      if (/^-\s+(?:Working|Thinking|Running|Reading|Writing|Finding|Searching|Checking|Applying|Planning)\b/i.test(compact)) {
+        return colorCardText(compact, CARD_COLORS.running);
+      }
+      if (/^-\s+(?:Ran|Explored|Opened|Searched|Found|Listed|Viewed)\b/i.test(compact)) {
+        return colorCardText(compact, CARD_COLORS.command);
+      }
+      if (/^-\s+(?:Read|Edited|Updated|Created|Deleted|Checked|Applied|Wrote)\b/i.test(compact)) {
+        return colorCardText(compact, CARD_COLORS.success);
+      }
+      if (/^-\s+(?:Would you like|Reason:|[123]\.)/i.test(compact)) {
+        return colorCardText(compact, CARD_COLORS.approval);
+      }
+      if (/^-\s+Codex 正在处理/.test(compact)) {
+        return colorCardText(compact, CARD_COLORS.running);
+      }
+      if (/^可在卡片按钮中选择/.test(compact)) {
+        return colorCardText(compact, CARD_COLORS.muted);
+      }
+      if (/^Ran\b/.test(compact)) return colorCardText(compact, CARD_COLORS.command);
+      if (/^Explored\b/.test(compact)) return colorCardText(compact, CARD_COLORS.command);
+      if (/^(?:Read|Edited|Updated|Created|Deleted|Checked|Applied|Wrote)\b/.test(compact)) {
+        return colorCardText(`- ${compact}`, CARD_COLORS.success);
+      }
+      if (/^└\s+/.test(compact)) {
+        return `> ${colorCardText(compact, CARD_COLORS.muted)}`;
+      }
       return value;
     })
     .join('\n');
 }
 
-function escapeMarkdownLine(text) {
-  return String(text || '').replace(/\*/g, '\\*');
+function colorCardText(text, color) {
+  return `<font color='${color}'>${escapeCardFontText(text)}</font>`;
+}
+
+function escapeCardFontText(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function normalizeMarkdownLineBreaks(text) {

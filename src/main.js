@@ -1,4 +1,5 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
+const fs = require('node:fs');
 const path = require('node:path');
 const { loadConfig, saveConfig } = require('./config');
 const { CodexSessionManager } = require('./codexSessionManager');
@@ -8,6 +9,8 @@ const { RemoteSessionController } = require('./remoteSessionController');
 const { PluginManager } = require('./plugins/pluginManager');
 const { FeishuRegistrationManager } = require('./plugins/feishu/registrationManager');
 const { createLogger } = require('./logger');
+const { RawOutputRecorder } = require('./rawOutputRecorder');
+const { parseLaunchOptions, buildCodexArgs } = require('./launchOptions');
 
 let mainWindow;
 let currentSession;
@@ -15,9 +18,26 @@ let config = loadConfig();
 let remoteController;
 let pluginManager;
 let feishuRegistrationManager;
+const launchOptions = parseLaunchOptions();
 
-const manager = new CodexSessionManager({ config });
+const MAIN_I18N = {
+  'zh-CN': {
+    chooseProjectDirectory: '选择项目目录',
+    contextCopy: '复制',
+    contextPaste: '粘贴',
+    contextSelectAll: '全选'
+  },
+  en: {
+    chooseProjectDirectory: 'Choose project directory',
+    contextCopy: 'Copy',
+    contextPaste: 'Paste',
+    contextSelectAll: 'Select All'
+  }
+};
+
 const logger = createLogger();
+const rawOutputRecorder = new RawOutputRecorder({ config, logger });
+const manager = new CodexSessionManager({ config, outputRecorder: rawOutputRecorder });
 const execRunner = new CodexExecRunner({ config, logger });
 const appServerRunner = new CodexAppServerRunner({ config, logger });
 
@@ -53,6 +73,8 @@ function createPluginRuntime() {
 
 async function restartPlugins() {
   remoteController?.updateConfig(config);
+  rawOutputRecorder.updateConfig(config);
+  manager.updateConfig(config);
   execRunner.updateConfig(config);
   appServerRunner.updateConfig(config);
   await pluginManager?.restart(config);
@@ -85,6 +107,7 @@ async function applyFeishuRegistration(result) {
 
   nextConfig.plugins.feishu = feishu;
   config = saveConfig(nextConfig);
+  rawOutputRecorder.updateConfig(config);
   manager.updateConfig(config);
   execRunner.updateConfig(config);
   appServerRunner.updateConfig(config);
@@ -134,6 +157,28 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'renderer.html'));
+  installContextMenu(mainWindow);
+}
+
+function installContextMenu(window) {
+  window.webContents.on('context-menu', (_event, params) => {
+    Menu.buildFromTemplate([
+      {
+        label: mainText('contextCopy'),
+        role: 'copy',
+        enabled: Boolean(params.selectionText)
+      },
+      {
+        label: mainText('contextPaste'),
+        role: 'paste'
+      },
+      { type: 'separator' },
+      {
+        label: mainText('contextSelectAll'),
+        role: 'selectAll'
+      }
+    ]).popup({ window });
+  });
 }
 
 function writeVisualNotice(message) {
@@ -151,11 +196,13 @@ function startCodex(cwd = config.codex.defaultCwd) {
     currentSession = null;
   }
 
-  currentSession = manager.create({ cwd, cols: 120, rows: 34 });
+  const args = buildCodexArgs(config.codex.args, launchOptions);
+  currentSession = manager.create({ cwd, args, cols: 120, rows: 34 });
   const session = currentSession;
   logger.event('visual.session.started', {
     sessionId: session.id,
-    cwd
+    cwd,
+    args
   });
 
   session.on('data', (chunk) => {
@@ -191,7 +238,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('session:choose-directory', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: 'Choose project directory',
+      title: mainText('chooseProjectDirectory'),
       defaultPath: config.codex.defaultCwd,
       properties: ['openDirectory']
     });
@@ -209,6 +256,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('config:save', async (_event, nextConfig) => {
     config = saveConfig(nextConfig || config);
+    rawOutputRecorder.updateConfig(config);
     manager.updateConfig(config);
     execRunner.updateConfig(config);
     appServerRunner.updateConfig(config);
@@ -231,9 +279,21 @@ app.whenReady().then(() => {
     return pluginManager.invoke(pluginId, action, payload);
   });
 
+  ipcMain.handle('logs:open-raw-output', async () => {
+    const logPath = rawOutputRecorder.logPath;
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.closeSync(fs.openSync(logPath, 'a'));
+    const error = await shell.openPath(logPath);
+    if (error) {
+      shell.showItemInFolder(logPath);
+    }
+    return { ok: true, path: logPath, openedFile: !error };
+  });
+
   ipcMain.handle('feishu:connect-start', async (_event, nextConfig) => {
     if (nextConfig && typeof nextConfig === 'object') {
       config = saveConfig(nextConfig);
+      rawOutputRecorder.updateConfig(config);
       manager.updateConfig(config);
       execRunner.updateConfig(config);
       appServerRunner.updateConfig(config);
@@ -273,7 +333,13 @@ app.whenReady().then(() => {
 
   ipcMain.on('terminal:snapshot', (_event, text) => {
     if (!currentSession) return;
+    if (text && typeof text === 'object') {
+      currentSession.visualSnapshot = String(text.scrollback || '');
+      currentSession.visualViewportSnapshot = String(text.viewport || '');
+      return;
+    }
     currentSession.visualSnapshot = String(text || '');
+    currentSession.visualViewportSnapshot = String(text || '');
   });
 
   mainWindow.webContents.once('did-finish-load', () => {
@@ -342,4 +408,9 @@ function runVisualSmokeTestIfRequested() {
       app.exit(1);
     }
   }, Number(process.env.REMOTE_CODEX_VISUAL_SMOKE_DELAY_MS) || 12000);
+}
+
+function mainText(key) {
+  const language = config.ui?.language === 'en' ? 'en' : 'zh-CN';
+  return MAIN_I18N[language]?.[key] || MAIN_I18N.en[key] || key;
 }

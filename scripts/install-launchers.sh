@@ -20,13 +20,24 @@ set -euo pipefail
 APP_DIR="${APP_DIR}"
 LAUNCH_CWD="\${PWD}"
 
+USER_SHELL="\${SHELL:-}"
+if [ -z "\${REMOTE_CODEX_SHELL_ENV_READY:-}" ] && [ "\${REMOTE_CODEX_SKIP_SHELL_ENV:-}" != "1" ] && [ -n "\${USER_SHELL}" ] && [ -x "\${USER_SHELL}" ]; then
+  export REMOTE_CODEX_SHELL_ENV_READY=1
+  SELF=\$(printf '%q' "\$0")
+  ARGS=""
+  for ARG in "\$@"; do
+    ARGS="\${ARGS} \$(printf '%q' "\${ARG}")"
+  done
+  exec "\${USER_SHELL}" -lic "exec \${SELF}\${ARGS}"
+fi
+
 if ! command -v npm >/dev/null 2>&1 && [ -s "\${HOME}/.nvm/nvm.sh" ]; then
   . "\${HOME}/.nvm/nvm.sh"
 fi
 
 export REMOTE_CODEX_LAUNCH_CWD="\${REMOTE_CODEX_LAUNCH_CWD:-\${LAUNCH_CWD}}"
 cd "\${APP_DIR}"
-exec npm start
+exec npm start -- "\$@"
 EOF
 
 cat > "${API_COMMAND}" <<EOF
@@ -36,13 +47,24 @@ set -euo pipefail
 APP_DIR="${APP_DIR}"
 LAUNCH_CWD="\${PWD}"
 
+USER_SHELL="\${SHELL:-}"
+if [ -z "\${REMOTE_CODEX_SHELL_ENV_READY:-}" ] && [ "\${REMOTE_CODEX_SKIP_SHELL_ENV:-}" != "1" ] && [ -n "\${USER_SHELL}" ] && [ -x "\${USER_SHELL}" ]; then
+  export REMOTE_CODEX_SHELL_ENV_READY=1
+  SELF=\$(printf '%q' "\$0")
+  ARGS=""
+  for ARG in "\$@"; do
+    ARGS="\${ARGS} \$(printf '%q' "\${ARG}")"
+  done
+  exec "\${USER_SHELL}" -lic "exec \${SELF}\${ARGS}"
+fi
+
 if ! command -v npm >/dev/null 2>&1 && [ -s "\${HOME}/.nvm/nvm.sh" ]; then
   . "\${HOME}/.nvm/nvm.sh"
 fi
 
 export REMOTE_CODEX_LAUNCH_CWD="\${REMOTE_CODEX_LAUNCH_CWD:-\${LAUNCH_CWD}}"
 cd "\${APP_DIR}"
-exec npm run api
+exec npm run api -- "\$@"
 EOF
 
 chmod +x "${APP_COMMAND}" "${API_COMMAND}"

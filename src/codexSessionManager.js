@@ -9,7 +9,17 @@ const defaultCommand = moduleConfig.codex.command || 'codex';
 const defaultCwd = moduleConfig.codex.defaultCwd || os.homedir();
 
 class CodexSession extends EventEmitter {
-  constructor({ id, command, args, cwd, cols, rows, env, maxBufferedChunks }) {
+  constructor({
+    id,
+    command,
+    args,
+    cwd,
+    cols,
+    rows,
+    env,
+    maxBufferedChunks,
+    outputRecorder
+  }) {
     super();
     this.id = id;
     this.command = command;
@@ -23,6 +33,7 @@ class CodexSession extends EventEmitter {
     this.cursor = 0;
     this.output = [];
     this.maxBufferedChunks = Number(maxBufferedChunks) || 5000;
+    this.outputRecorder = outputRecorder || null;
 
     this.shell = pty.spawn(command, args, {
       name: 'xterm-256color',
@@ -47,12 +58,14 @@ class CodexSession extends EventEmitter {
       if (this.output.length > this.maxBufferedChunks) {
         this.output.splice(0, this.output.length - this.maxBufferedChunks);
       }
+      this.outputRecorder?.recordOutput(this, chunk);
       this.emit('data', chunk);
     });
 
     this.shell.onExit(({ exitCode, signal }) => {
       this.exitedAt = new Date().toISOString();
       this.exit = { exitCode, signal: signal || null };
+      this.outputRecorder?.recordExit(this, this.exit);
       this.emit('exit', this.exit);
     });
   }
@@ -61,6 +74,7 @@ class CodexSession extends EventEmitter {
     if (!this.shell || this.exit) {
       throw new Error('Session has exited');
     }
+    this.outputRecorder?.recordInput(this, data);
     this.shell.write(data);
   }
 
@@ -112,11 +126,13 @@ class CodexSession extends EventEmitter {
 class CodexSessionManager {
   constructor(options = {}) {
     this.sessions = new Map();
+    this.outputRecorder = options.outputRecorder || null;
     this.updateConfig(options.config || loadConfig());
   }
 
   updateConfig(config) {
     this.config = config || loadConfig();
+    this.outputRecorder?.updateConfig?.(this.config);
     this.defaultCommand = this.config.codex.command || defaultCommand;
     this.defaultArgs = Array.isArray(this.config.codex.args)
       ? this.config.codex.args
@@ -140,7 +156,8 @@ class CodexSessionManager {
       cols: Number(options.cols) || 120,
       rows: Number(options.rows) || 34,
       env: options.env && typeof options.env === 'object' ? options.env : {},
-      maxBufferedChunks: this.maxBufferedChunks
+      maxBufferedChunks: this.maxBufferedChunks,
+      outputRecorder: this.outputRecorder
     });
 
     this.sessions.set(id, session);

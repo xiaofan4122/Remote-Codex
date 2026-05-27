@@ -6,14 +6,16 @@ const { RemoteSessionController } = require('./remoteSessionController');
 const { PluginManager } = require('./plugins/pluginManager');
 const { FeishuRegistrationManager } = require('./plugins/feishu/registrationManager');
 const { createLogger } = require('./logger');
+const { RawOutputRecorder } = require('./rawOutputRecorder');
 
 let config = loadConfig();
 const host = config.api.host;
 const port = Number(config.api.port);
 const allowCommandOverride = Boolean(config.api.allowCommandOverride);
 const apiToken = config.api.token || '';
-const manager = new CodexSessionManager({ config });
 const logger = createLogger();
+const rawOutputRecorder = new RawOutputRecorder({ config, logger });
+const manager = new CodexSessionManager({ config, outputRecorder: rawOutputRecorder });
 const remoteController = new RemoteSessionController({
   sessionManager: manager,
   config,
@@ -32,6 +34,8 @@ function cloneConfig(value = config) {
 
 async function restartPlugins() {
   remoteController.updateConfig(config);
+  rawOutputRecorder.updateConfig(config);
+  manager.updateConfig(config);
   await pluginManager.restart(config);
 }
 
@@ -58,6 +62,7 @@ async function applyFeishuRegistration(result) {
 
   nextConfig.plugins.feishu = feishu;
   config = saveConfig(nextConfig);
+  rawOutputRecorder.updateConfig(config);
   manager.updateConfig(config);
 
   let pluginError = '';

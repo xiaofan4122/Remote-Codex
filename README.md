@@ -34,6 +34,21 @@ After installing, open the app from your terminal with:
 remote-codex
 ```
 
+Resume an existing Codex TUI session at startup:
+
+```bash
+remote-codex --resume --last
+remote-codex --resume SESSION_ID
+remote-codex resume --last
+```
+
+Environment-variable form:
+
+```bash
+REMOTE_CODEX_RESUME=last remote-codex
+REMOTE_CODEX_RESUME=SESSION_ID REMOTE_CODEX_RESUME_PROMPT="continue" remote-codex
+```
+
 When launched from a terminal, Remote Codex uses that terminal's current
 directory as the default Codex working directory unless you saved another
 default folder in Settings or set `CODEX_WORKDIR`.
@@ -136,9 +151,14 @@ from Codex itself.
 Feishu replies default to `visual_terminal`, so remote messages drive the same
 native Codex TUI shown in the Electron window. This preserves slash commands,
 approval prompts, keyboard navigation, and model switching behavior.
+Plain remote text is pasted into the Codex composer and confirmed with Tab, so
+it follows Codex's default queue-message behavior instead of forcing an
+immediate Enter submit.
 When Feishu streaming cards are available, the card is updated with visible
 Codex progress such as `Working`, command runs, file reads, and edits before
-the final reply is shown.
+the final reply is shown. Cards use semantic colors for progress, approvals,
+commands, file changes, warnings, and final replies; the local Electron window
+remains the source of the native terminal rendering.
 
 If you prefer structured Codex app-server events instead of the visible
 terminal, set `remoteControl.responseSource` to `app_server`. That path avoids
@@ -154,9 +174,26 @@ Samples are written to `~/.local/state/remote-codex/cleaning-corpus.jsonl` by
 default. Use `npm run corpus:cleaning` to extract historical log samples and
 `npm run corpus:replay -- /path/to/corpus.jsonl` to replay the current cleaning
 rules against captured raw/snapshot output.
-If Codex opens an approval prompt in visual terminal mode, use the card buttons
-or send `/approve` / `/deny`. For selection-style prompts, `/up`, `/down`, and
-`/enter` pass through the matching terminal keys.
+
+For temporary full PTY logging during parser work, enable the raw output log:
+
+```bash
+REMOTE_CODEX_RAW_OUTPUT_LOG=1 remote-codex
+```
+
+Raw events are written to `~/.local/state/remote-codex/raw-output.jsonl` by
+default. The JSONL stores input/output/exit events, session metadata, a readable
+preview, and base64-encoded PTY bytes. Use
+`npm run rawlog:replay -- /path/to/raw-output.jsonl` to replay the current text
+parser against long-running captures. This can contain prompts, command output,
+and file contents, so keep it disabled unless you are collecting parser samples.
+The same raw output log can be enabled from Settings with the checkbox next to
+`Open Log`.
+If Codex opens an approval prompt in visual terminal mode, the streaming card
+switches to a waiting-for-confirmation view with the command, reason, and
+visible options. Use the card buttons or send `/approve`, `/always`, or
+`/deny`. For selection-style prompts, `/up`, `/down`, and `/enter` pass through
+the matching terminal keys.
 
 For advanced/manual Feishu setup, configure these in the config file:
 
@@ -175,6 +212,7 @@ Remote commands:
 /status
 /tail
 /approve
+/always
 /deny
 /enter
 /up

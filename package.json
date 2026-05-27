@@ -9,6 +9,8 @@
     "api": "node src/api-server.js",
     "corpus:cleaning": "node scripts/extract-cleaning-corpus.js",
     "corpus:replay": "node scripts/replay-cleaning-corpus.js",
+    "rawlog:replay": "node scripts/replay-raw-output-log.js",
+    "smoke:native-slash": "node scripts/smoke-native-slash.js",
     "install:launchers": "bash scripts/install-launchers.sh",
     "rebuild": "electron-rebuild -f -w node-pty"
   },

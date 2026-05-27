@@ -12,9 +12,16 @@ Remote replies drive the visible local Electron terminal by default, so Feishu
 input appears in the same native Codex TUI that the user sees locally. Set
 `remoteControl.responseSource` to `app_server` only when you prefer structured
 Codex app-server events over the visible terminal.
+Plain Feishu text is pasted into the Codex composer and confirmed with Tab, so
+it uses Codex's queue-message behavior by default.
 
 Streaming cards show visible Codex progress from the TUI, including running
 status, command execution, file reads, and edits, then append the final reply.
+Cards use semantic colors to approximate the native terminal: running status
+and approvals are orange, command execution is blue, file changes and final
+replies are green, warnings are orange, and errors are red.
+Approval prompts are rendered as a waiting-for-confirmation card. The `Yes`,
+`Always`, and `No` buttons map to the native Codex prompt keys.
 
 Advanced config lives under:
 
@@ -55,6 +62,7 @@ Supported remote commands:
 - `/status`
 - `/tail`
 - `/approve`
+- `/always`
 - `/deny`
 - `/enter`
 - `/up`

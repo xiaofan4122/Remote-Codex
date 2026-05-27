@@ -1,9 +1,15 @@
 {
+  "ui": {
+    "language": "zh-CN"
+  },
   "codex": {
     "defaultCwd": ""
   },
   "remoteControl": {
-    "responseSource": "visual_terminal"
+    "responseSource": "visual_terminal",
+    "rawOutputLogEnabled": false,
+    "rawOutputLogPath": "",
+    "rawOutputLogMaxBytes": 52428800
   },
   "plugins": {
     "feishu": {

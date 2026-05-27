@@ -3,6 +3,9 @@ const os = require('node:os');
 const path = require('node:path');
 
 const defaultConfig = {
+  ui: {
+    language: 'zh-CN'
+  },
   codex: {
     command: 'codex',
     args: ['--no-alt-screen'],
@@ -26,7 +29,11 @@ const defaultConfig = {
     responseSource: 'visual_terminal',
     captureCleaningCorpus: false,
     cleaningCorpusPath: '',
-    flushIntervalMs: 250
+    rawOutputLogEnabled: false,
+    rawOutputLogPath: '',
+    rawOutputLogMaxBytes: 52428800,
+    flushIntervalMs: 250,
+    finalReplyDebounceMs: 6000
   },
   plugins: {
     feishu: {
@@ -117,6 +124,9 @@ function parseList(value) {
 
 function getEnvConfig() {
   return {
+    ui: {
+      language: process.env.REMOTE_CODEX_LANGUAGE || process.env.CODEX_UI_LANGUAGE
+    },
     codex: {
       command: process.env.CODEX_COMMAND,
       args: parseList(process.env.CODEX_ARGS),
@@ -135,7 +145,11 @@ function getEnvConfig() {
     },
     remoteControl: {
       captureCleaningCorpus: parseBoolean(process.env.REMOTE_CODEX_CAPTURE_CLEANING),
-      cleaningCorpusPath: process.env.REMOTE_CODEX_CLEANING_CORPUS
+      cleaningCorpusPath: process.env.REMOTE_CODEX_CLEANING_CORPUS,
+      rawOutputLogEnabled: parseBoolean(process.env.REMOTE_CODEX_RAW_OUTPUT_LOG),
+      rawOutputLogPath: process.env.REMOTE_CODEX_RAW_OUTPUT_LOG_PATH,
+      rawOutputLogMaxBytes: parseNumber(process.env.REMOTE_CODEX_RAW_OUTPUT_LOG_MAX_BYTES),
+      finalReplyDebounceMs: parseNumber(process.env.REMOTE_CODEX_FINAL_REPLY_DEBOUNCE_MS)
     },
     plugins: {
       feishu: {
@@ -173,9 +187,13 @@ function normalizeConfig(config, configPath = getConfigPath()) {
   const next = deepMerge(defaultConfig, config);
   next.configPath = configPath;
 
+  if (!isPlainObject(next.ui)) {
+    next.ui = {};
+  }
   next.remoteControl.outputMode = normalizeOutputMode(
     next.remoteControl.outputMode
   );
+  next.ui.language = normalizeLanguage(next.ui.language);
   next.remoteControl.responseSource = normalizeResponseSource(
     next.remoteControl.responseSource
   );
@@ -196,6 +214,15 @@ function normalizeConfig(config, configPath = getConfigPath()) {
   }
 
   return next;
+}
+
+function normalizeLanguage(value) {
+  const language = String(value || '').trim().toLowerCase();
+  if (['en', 'en-us', 'en_us', 'english'].includes(language)) return 'en';
+  if (['zh', 'zh-cn', 'zh_cn', 'cn', 'chinese', '中文'].includes(language)) {
+    return 'zh-CN';
+  }
+  return defaultConfig.ui.language;
 }
 
 function normalizeOutputMode(value) {

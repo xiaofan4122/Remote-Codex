@@ -8,6 +8,9 @@ const settingsButton = document.getElementById('settings');
 const settingsPanel = document.getElementById('settingsPanel');
 const settingsForm = document.getElementById('settingsForm');
 const closeSettingsButton = document.getElementById('closeSettings');
+const languageSelect = document.getElementById('uiLanguage');
+const rawOutputLogCheckbox = document.getElementById('rawOutputLogEnabled');
+const openRawOutputLogButton = document.getElementById('openRawOutputLog');
 const connectFeishuButton = document.getElementById('connectFeishu');
 const cancelFeishuConnectButton = document.getElementById('cancelFeishuConnect');
 const openFeishuConnectButton = document.getElementById('openFeishuConnect');
@@ -18,11 +21,104 @@ const settingsStatus = document.getElementById('settingsStatus');
 
 let currentCwd = null;
 let currentConfig = null;
+let currentLanguage = 'zh-CN';
+let currentFeishuStatus = { status: 'idle' };
 let feishuConnectUrl = '';
 let fitFrame = null;
 let snapshotTimer = null;
 let lastSize = { cols: 0, rows: 0 };
 let scrollbarSyncing = false;
+
+const I18N = {
+  'zh-CN': {
+    starting: '启动中...',
+    openProject: '打开项目',
+    restartCodex: '重启 Codex',
+    settings: '设置',
+    close: '关闭',
+    interface: '界面',
+    language: '语言',
+    languageChinese: '中文',
+    languageEnglish: 'English',
+    terminalScrollback: '终端滚动历史',
+    defaultWorkingDirectory: '默认工作目录',
+    rawOutputLogEnabled: '记录 Codex 原始输出',
+    openLog: '打开日志',
+    rawOutputLogOpened: '日志已打开。',
+    rawOutputLogOpenFailed: '打开日志失败。',
+    connection: '连接',
+    notConnected: '未连接。',
+    connectFeishu: '连接飞书',
+    reconnectFeishu: '重新连接飞书',
+    openLink: '打开链接',
+    cancel: '取消',
+    save: '保存',
+    loadingSettings: '正在加载设置...',
+    settingsLoaded: '设置已加载。',
+    savingSettings: '正在保存设置...',
+    settingsSaved: '设置已保存。',
+    savedPluginError: '已保存。插件错误：{error}',
+    couldNotOpenFeishuLink: '无法打开飞书链接。',
+    preparingFeishuAuthorization: '正在准备飞书授权...',
+    failedStartFeishuAuthorization: '启动飞书授权失败。',
+    failedCancelFeishuAuthorization: '取消飞书授权失败。',
+    configured: '已配置：{value}',
+    connected: '已连接：{value}',
+    feishuConnectedSaved: '飞书已连接并保存。',
+    feishuStatusStarting: '正在准备飞书授权...',
+    feishuStatusWaiting: '打开飞书授权链接继续。',
+    feishuStatusPolling: '正在等待飞书授权...',
+    feishuStatusSlowDown: '飞书要求降低轮询频率。',
+    feishuStatusDomainSwitched: '已切换到 Lark 授权域名。',
+    feishuStatusAborting: '正在取消飞书授权...',
+    feishuStatusAborted: '已取消飞书授权。',
+    feishuStatusError: '飞书连接失败。'
+  },
+  en: {
+    starting: 'Starting...',
+    openProject: 'Open Project',
+    restartCodex: 'Restart Codex',
+    settings: 'Settings',
+    close: 'Close',
+    interface: 'Interface',
+    language: 'Language',
+    languageChinese: '中文',
+    languageEnglish: 'English',
+    terminalScrollback: 'Terminal scrollback',
+    defaultWorkingDirectory: 'Default working directory',
+    rawOutputLogEnabled: 'Record raw Codex output',
+    openLog: 'Open Log',
+    rawOutputLogOpened: 'Log opened.',
+    rawOutputLogOpenFailed: 'Failed to open log.',
+    connection: 'Connection',
+    notConnected: 'Not connected.',
+    connectFeishu: 'Connect Feishu',
+    reconnectFeishu: 'Reconnect Feishu',
+    openLink: 'Open Link',
+    cancel: 'Cancel',
+    save: 'Save',
+    loadingSettings: 'Loading settings...',
+    settingsLoaded: 'Settings loaded.',
+    savingSettings: 'Saving settings...',
+    settingsSaved: 'Settings saved.',
+    savedPluginError: 'Saved. Plugin error: {error}',
+    couldNotOpenFeishuLink: 'Could not open Feishu link.',
+    preparingFeishuAuthorization: 'Preparing Feishu authorization...',
+    failedStartFeishuAuthorization: 'Failed to start Feishu authorization.',
+    failedCancelFeishuAuthorization: 'Failed to cancel Feishu authorization.',
+    configured: 'Configured: {value}',
+    connected: 'Connected: {value}',
+    feishuConnectedSaved: 'Feishu connected and saved.',
+    feishuStatusStarting: 'Preparing Feishu authorization...',
+    feishuStatusWaiting: 'Open the Feishu authorization link to continue.',
+    feishuStatusPolling: 'Waiting for Feishu authorization...',
+    feishuStatusSlowDown: 'Feishu asked to slow down polling.',
+    feishuStatusDomainSwitched: 'Switched to Lark authorization domain.',
+    feishuStatusAborting: 'Cancelling Feishu authorization...',
+    feishuStatusAborted: 'Feishu authorization cancelled.',
+    feishuStatusError: 'Feishu connection failed.'
+  }
+};
 
 const fitAddon = new FitAddon.FitAddon();
 const term = new Terminal({
@@ -101,6 +197,7 @@ window.codexShell.onCwd((cwd) => {
 });
 window.codexShell.onConfigUpdated((config) => {
   currentConfig = config;
+  setLanguage(config.ui?.language);
   if (settingsPanel.getAttribute('aria-hidden') === 'false') {
     populateSettings(config);
   }
@@ -129,7 +226,10 @@ function scheduleTerminalSnapshot() {
 
   snapshotTimer = setTimeout(() => {
     snapshotTimer = null;
-    window.codexShell.snapshot(readTerminalSnapshot());
+    window.codexShell.snapshot({
+      scrollback: readTerminalSnapshot(),
+      viewport: readTerminalViewportSnapshot()
+    });
   }, 40);
 }
 
@@ -196,6 +296,36 @@ function readTerminalSnapshot() {
   return lines.join('\n');
 }
 
+function readTerminalViewportSnapshot() {
+  const buffer = term.buffer.active;
+  const lines = [];
+  const start = Math.max(0, buffer.viewportY);
+  const end = Math.min(buffer.length, start + term.rows);
+  let logicalLine = '';
+
+  for (let index = start; index < end; index += 1) {
+    const line = buffer.getLine(index);
+    if (!line) continue;
+
+    const text = line.translateToString(true);
+    if (line.isWrapped) {
+      logicalLine += text;
+      continue;
+    }
+
+    if (logicalLine) {
+      lines.push(logicalLine);
+    }
+    logicalLine = text;
+  }
+
+  if (logicalLine) {
+    lines.push(logicalLine);
+  }
+
+  return lines.join('\n');
+}
+
 chooseDirButton.addEventListener('click', async () => {
   await window.codexShell.chooseDirectory();
   setTimeout(requestFit, 100);
@@ -227,6 +357,14 @@ settingsForm.addEventListener('submit', async (event) => {
   await saveSettings();
 });
 
+languageSelect.addEventListener('change', () => {
+  setLanguage(languageSelect.value);
+  if (currentConfig) {
+    renderFeishuConfiguredState(currentConfig);
+  }
+  renderFeishuConnectStatus(currentFeishuStatus);
+});
+
 connectFeishuButton.addEventListener('click', async () => {
   if (!currentConfig) {
     currentConfig = await window.codexShell.getConfig();
@@ -235,7 +373,7 @@ connectFeishuButton.addEventListener('click', async () => {
   const nextConfig = collectSettings(currentConfig);
   renderFeishuConnectStatus({
     status: 'starting',
-    message: 'Preparing Feishu authorization...'
+    message: t('preparingFeishuAuthorization')
   });
 
   try {
@@ -244,7 +382,7 @@ connectFeishuButton.addEventListener('click', async () => {
   } catch (error) {
     renderFeishuConnectStatus({
       status: 'error',
-      message: error.message || 'Failed to start Feishu authorization.'
+      message: error.message || t('failedStartFeishuAuthorization')
     });
   }
 });
@@ -256,7 +394,7 @@ cancelFeishuConnectButton.addEventListener('click', async () => {
   } catch (error) {
     renderFeishuConnectStatus({
       status: 'error',
-      message: error.message || 'Failed to cancel Feishu authorization.'
+      message: error.message || t('failedCancelFeishuAuthorization')
     });
   }
 });
@@ -267,7 +405,16 @@ openFeishuConnectButton.addEventListener('click', async () => {
   try {
     await window.codexShell.openExternal(feishuConnectUrl);
   } catch (error) {
-    setSettingsStatus(error.message || 'Could not open Feishu link.');
+    setSettingsStatus(error.message || t('couldNotOpenFeishuLink'));
+  }
+});
+
+openRawOutputLogButton.addEventListener('click', async () => {
+  try {
+    const result = await window.codexShell.openRawOutputLog();
+    setSettingsStatus(result?.path ? `${t('rawOutputLogOpened')} ${result.path}` : t('rawOutputLogOpened'));
+  } catch (error) {
+    setSettingsStatus(error.message || t('rawOutputLogOpenFailed'));
   }
 });
 
@@ -275,12 +422,19 @@ window.addEventListener('resize', requestFit);
 new ResizeObserver(requestFit).observe(terminalElement);
 setTimeout(requestFit, 100);
 
+window.codexShell.getConfig().then((config) => {
+  currentConfig = config;
+  setLanguage(config.ui?.language);
+}).catch(() => {
+  setLanguage(currentLanguage);
+});
+
 async function loadSettings() {
-  setSettingsStatus('Loading settings...');
+  setSettingsStatus(t('loadingSettings'));
   currentConfig = await window.codexShell.getConfig();
   populateSettings(currentConfig);
   renderFeishuConnectStatus(await window.codexShell.getFeishuConnectStatus());
-  setSettingsStatus('Settings loaded.');
+  setSettingsStatus(t('settingsLoaded'));
 }
 
 async function saveSettings() {
@@ -289,41 +443,49 @@ async function saveSettings() {
   }
 
   const nextConfig = collectSettings(currentConfig);
-  setSettingsStatus('Saving settings...');
+  setSettingsStatus(t('savingSettings'));
   const result = await window.codexShell.saveConfig(nextConfig);
   currentConfig = result.config;
   populateSettings(currentConfig);
 
   if (result.pluginError) {
-    setSettingsStatus(`Saved. Plugin error: ${result.pluginError}`);
+    setSettingsStatus(t('savedPluginError', { error: result.pluginError }));
     return;
   }
 
-  setSettingsStatus('Settings saved.');
+  setSettingsStatus(t('settingsSaved'));
 }
 
 function populateSettings(config) {
-  const feishu = config.plugins?.feishu || {};
-
+  setLanguage(config.ui?.language);
+  setValue('uiLanguage', currentLanguage);
   setValue('codexDefaultCwd', config.codex?.defaultCwd || '');
+  rawOutputLogCheckbox.checked = Boolean(config.remoteControl?.rawOutputLogEnabled);
+  renderFeishuConfiguredState(config);
+}
 
+function renderFeishuConfiguredState(config) {
+  const feishu = config.plugins?.feishu || {};
   if (feishu.appId) {
-    feishuConnectState.textContent = `Configured: ${maskValue(feishu.appId)}`;
-    connectFeishuButton.textContent = 'Reconnect Feishu';
+    feishuConnectState.textContent = t('configured', { value: maskValue(feishu.appId) });
+    connectFeishuButton.textContent = t('reconnectFeishu');
   } else {
-    feishuConnectState.textContent = 'Not connected.';
-    connectFeishuButton.textContent = 'Connect Feishu';
+    feishuConnectState.textContent = t('notConnected');
+    connectFeishuButton.textContent = t('connectFeishu');
   }
 }
 
 function collectSettings(baseConfig) {
   const next = structuredClone(baseConfig);
   next.codex = next.codex || {};
+  next.ui = next.ui || {};
   next.remoteControl = next.remoteControl || {};
   next.plugins = next.plugins || {};
   next.plugins.feishu = next.plugins.feishu || {};
 
+  next.ui.language = normalizeLanguage(getValue('uiLanguage'));
   next.codex.defaultCwd = getValue('codexDefaultCwd');
+  next.remoteControl.rawOutputLogEnabled = rawOutputLogCheckbox.checked;
 
   const feishu = next.plugins.feishu;
   next.remoteControl.autoCreateSession = true;
@@ -348,6 +510,7 @@ function setSettingsStatus(message) {
 }
 
 function renderFeishuConnectStatus(status = { status: 'idle' }) {
+  currentFeishuStatus = status;
   const activeStatuses = new Set([
     'starting',
     'waiting',
@@ -380,18 +543,18 @@ function renderFeishuConnectStatus(status = { status: 'idle' }) {
     feishuConnectLink.textContent = '';
   }
 
-  const message = status.message || status.status || 'Not connected.';
+  const message = getFeishuStatusMessage(status);
   if (status.status === 'complete') {
     feishuConnectState.textContent = status.pluginError
       ? status.message
-      : `Connected: ${maskValue(status.appId)}`;
-    connectFeishuButton.textContent = 'Reconnect Feishu';
+      : t('connected', { value: maskValue(status.appId) });
+    connectFeishuButton.textContent = t('reconnectFeishu');
     openFeishuConnectButton.disabled = true;
     cancelFeishuConnectButton.disabled = true;
     feishuConnectQr.hidden = true;
     feishuConnectLink.textContent = '';
     feishuConnectUrl = '';
-    setSettingsStatus(status.pluginError ? status.message : 'Feishu connected and saved.');
+    setSettingsStatus(status.pluginError ? status.message : t('feishuConnectedSaved'));
     return;
   }
 
@@ -416,4 +579,51 @@ function maskValue(value) {
   const text = String(value || '');
   if (text.length <= 10) return text;
   return `${text.slice(0, 6)}...${text.slice(-4)}`;
+}
+
+function setLanguage(language) {
+  currentLanguage = normalizeLanguage(language);
+  document.documentElement.lang = currentLanguage;
+  languageSelect.value = currentLanguage;
+
+  for (const element of document.querySelectorAll('[data-i18n]')) {
+    element.textContent = t(element.dataset.i18n);
+  }
+
+  if (!currentCwd) {
+    cwdElement.textContent = t('starting');
+  }
+  terminalScrollbar.setAttribute('aria-label', t('terminalScrollback'));
+}
+
+function normalizeLanguage(language) {
+  return language === 'en' ? 'en' : 'zh-CN';
+}
+
+function t(key, params = {}) {
+  const dictionary = I18N[currentLanguage] || I18N['zh-CN'];
+  const fallback = I18N.en[key] || key;
+  const template = dictionary[key] || fallback;
+  return template.replace(/\{(\w+)\}/g, (_match, name) => params[name] ?? '');
+}
+
+function getFeishuStatusMessage(status = {}) {
+  if (status.status === 'error' && status.message) {
+    return status.message;
+  }
+
+  const statusKey = {
+    idle: 'notConnected',
+    starting: 'feishuStatusStarting',
+    waiting: 'feishuStatusWaiting',
+    polling: 'feishuStatusPolling',
+    slow_down: 'feishuStatusSlowDown',
+    domain_switched: 'feishuStatusDomainSwitched',
+    aborting: 'feishuStatusAborting',
+    aborted: 'feishuStatusAborted',
+    error: 'feishuStatusError'
+  }[status.status];
+
+  if (statusKey) return t(statusKey);
+  return status.message || status.status || t('notConnected');
 }
