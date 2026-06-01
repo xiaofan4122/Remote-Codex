@@ -51,13 +51,13 @@ const fixtures = [
     expected: [
       '**进度**',
       '- 基础检查都过了，但我还要验证两个边界。',
-      '  这样可以避免最终回答和流式更新互相干扰。',
-      '- Ran node -c scripts/smoke-remote-streaming.js',
-      '- Ran node -e "const parser=require(\'./src/remoteSessionController\')"',
-      '- Explored',
-      '- Edited src/remoteSessionController.js'
+      '  这样可以避免最终回答和流式更新互相干扰。'
     ].join('\n'),
     forbidden: [
+      'node -c',
+      'node -e',
+      'Explored',
+      'Edited src/remoteSessionController.js',
       'console.log',
       'Search updateReplyStream'
     ]
@@ -75,14 +75,13 @@ const fixtures = [
       ].join('\n');
       return formatVisualProgressSnapshot(snapshot, input);
     },
-    expected: [
-      '**进度**',
-      '- Read src/plugins/feishu/index.js',
-      '- Searched streaming card docs',
-      '- Edited src/plugins/feishu/index.js',
-      '- Ran node -c src/plugins/feishu/index.js'
-    ].join('\n'),
-    forbidden: []
+    expected: '',
+    forbidden: [
+      'Read src/plugins/feishu/index.js',
+      'Searched streaming card docs',
+      'Edited src/plugins/feishu/index.js',
+      'Ran node -c src/plugins/feishu/index.js'
+    ]
   },
   {
     name: 'thinking explanation streams before technical actions',
@@ -117,8 +116,7 @@ const fixtures = [
     expected: [
       '**进度**',
       '- Working (7s)',
-      '- 我已经定位到两个具体修复点，正在改代码：一个是 viewport 里没有原始 prompt 时仍然解析当前 turn 的可见输出，另一个是把“完成”回调接到流式卡片关闭或最终回复发送成功之后。',
-      '- Edited src/remoteSessionController.js'
+      '- 我已经定位到两个具体修复点，正在改代码：一个是 viewport 里没有原始 prompt 时仍然解析当前 turn 的可见输出，另一个是把“完成”回调接到流式卡片关闭或最终回复发送成功之后。'
     ].join('\n')
   },
   {
@@ -158,6 +156,69 @@ const fixtures = [
     expected: [
       '可以，已改好。',
       '现在 Feishu 收到你发来的远程命令后，会先给原消息加“工作中”表情；远程任务正常处理完成后，会再给同一条消息加“完成”表情。'
+    ].join('\n')
+  },
+  {
+    name: 'missing prompt fallback starts after remote input notice',
+    run: () => {
+      const input = '继续修复这个问题';
+      const snapshot = [
+        '• 已整理、提交并推送。',
+        '  当前工作区是干净的。',
+        '─ Worked for 1m 51s ─────────────────────────',
+        '› Find and fix a bug in @filename',
+        `[Remote Codex] Feishu user: ${input}`
+      ].join('\n');
+      return {
+        progress: formatVisualProgressSnapshot(snapshot, input, { allowMissingPrompt: true }),
+        final: formatVisualSnapshot(snapshot, input, { allowMissingPrompt: true }),
+        classifiedFinal: classifyVisualTurnOutput(snapshot, input, {
+          allowMissingPrompt: true
+        }).finalText
+      };
+    },
+    expected: {
+      progress: '',
+      final: '',
+      classifiedFinal: ''
+    }
+  },
+  {
+    name: 'missing prompt fallback accepts summarized remote input notice',
+    run: () => {
+      const input = '继续修复这个问题';
+      const snapshot = [
+        '• 已整理、提交并推送。',
+        '  当前工作区是干净的。',
+        '─ Worked for 1m 51s ─────────────────────────',
+        '[Remote Codex] Feishu user: received 127 chars: "继续修复这个问题…"',
+        '• 我会先看日志，再改解析边界。',
+        '• Waited for background terminal · npm run capture:replay -- /tmp/raw.jsonl'
+      ].join('\n');
+      return formatVisualProgressSnapshot(snapshot, input, { allowMissingPrompt: true });
+    },
+    expected: [
+      '**进度**',
+      '- 我会先看日志，再改解析边界。'
+    ].join('\n'),
+    forbidden: ['Waited for background terminal', 'npm run capture:replay']
+  },
+  {
+    name: 'missing prompt fallback keeps response after remote input notice',
+    run: () => {
+      const input = '继续修复这个问题';
+      const snapshot = [
+        '• 已整理、提交并推送。',
+        '─ Worked for 1m 51s ─────────────────────────',
+        '› Find and fix a bug in @filename',
+        `[Remote Codex] Feishu user: ${input}`,
+        '• 我会先看日志，再改解析边界。'
+      ].join('\n');
+      return formatVisualProgressSnapshot(snapshot, input, { allowMissingPrompt: true });
+    },
+    expected: [
+      '**进度**',
+      '- 我会先看日志，再改解析边界。'
     ].join('\n')
   },
   {
@@ -266,13 +327,13 @@ const fixtures = [
       ].join('\n');
       return formatTerminalProgress(raw);
     },
-    expected: [
-      '**进度**',
-      '- Ran node -c scripts/smoke-remote-streaming.js',
-      '- Explored',
-      '- Updated src/remoteSessionController.js'
-    ].join('\n'),
-    forbidden: ['Search isLikelyProgressMarkerText']
+    expected: '',
+    forbidden: [
+      'Ran node -c scripts/smoke-remote-streaming.js',
+      'Explored',
+      'Updated src/remoteSessionController.js',
+      'Search isLikelyProgressMarkerText'
+    ]
   },
   {
     name: 'working status remains visible',
@@ -430,10 +491,13 @@ const fixtures = [
       '**进度**',
       '- Thinking (5s)',
       '- 我会先复现上次丢回复的问题。',
-      '- Ran npm run test:remote-output-parser',
       '- 现在改成剥离外部页面块。'
     ].join('\n'),
-    forbidden: ['scripts/test-remote-output-parser.js', 'src/remoteSessionController.js']
+    forbidden: [
+      'Ran npm run test:remote-output-parser',
+      'scripts/test-remote-output-parser.js',
+      'src/remoteSessionController.js'
+    ]
   },
   {
     name: 'styled progress carries Codex color marker',
@@ -450,11 +514,8 @@ const fixtures = [
       };
       return formatVisualProgressSnapshot(snapshot, input, { colorMarkers: true });
     },
-    expected: [
-      '**进度**',
-      '- <!--remote-codex-color:rgba(96,165,250,1)-->Ran node -c scripts/smoke-remote-streaming.js'
-    ].join('\n'),
-    forbidden: []
+    expected: '',
+    forbidden: ['Ran node -c scripts/smoke-remote-streaming.js']
   },
   {
     name: 'Feishu markdown consumes internal color markers',

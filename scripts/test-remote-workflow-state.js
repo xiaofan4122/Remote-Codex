@@ -12,6 +12,7 @@ async function main() {
   await testStopInterruptsWithoutClosingSession();
   await testStaleBusyStateDoesNotBlockNewInput();
   await testVisibleIdlePromptDoesNotBlockNewInput();
+  await testNewInputDiscardsPendingFinalReply();
   await testActiveVisualStateStillBlocksNewInput();
   testDebugStateReportsVisualPhase();
   testSessionPhases();
@@ -220,6 +221,45 @@ async function testVisibleIdlePromptDoesNotBlockNewInput() {
   assert.match(writes[0], /new task/);
   assert.equal(state.lastInputText, 'new task');
   assert.ok(state.turnStartedAt > Date.now() - 5000);
+}
+
+async function testNewInputDiscardsPendingFinalReply() {
+  const controller = createController();
+  const writes = [];
+  const replies = [];
+  let finished = 0;
+  const state = createState({
+    turnStartedAt: Date.now() - 40 * 1000,
+    snapshot: [
+      '上一轮最终回复还留在屏幕里。',
+      '› '
+    ].join('\n'),
+    write(input) {
+      writes.push(input);
+    }
+  });
+  state.lastInputText = 'old task';
+  state.pendingReplyText = 'old final reply';
+  state.pendingReplyTimer = setTimeout(() => {}, 10000);
+  controller.sessions.set('feishu:chat', state);
+
+  await controller.handleMessage({
+    pluginId: 'feishu',
+    conversationId: 'chat',
+    userId: 'user',
+    text: 'new task',
+    reply: async (text) => replies.push(text),
+    onTurnFinished: async () => {
+      finished += 1;
+    }
+  });
+
+  assert.deepEqual(replies, []);
+  assert.equal(finished, 0);
+  assert.equal(state.pendingReplyText, '');
+  assert.equal(state.pendingReplyTimer, null);
+  assert.equal(writes.length, 1);
+  assert.match(writes[0], /new task/);
 }
 
 async function testActiveVisualStateStillBlocksNewInput() {

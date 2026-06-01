@@ -18,6 +18,7 @@
     "test:native-slash-pages": "node scripts/test-native-slash-pages.js",
     "test:permission-card-actions": "node scripts/test-permission-card-actions.js",
     "test:resume-hint": "node scripts/test-resume-hint.js",
+    "test:remote-visual-notice": "node scripts/test-remote-visual-notice.js",
     "test:remote-workflow-state": "node scripts/test-remote-workflow-state.js",
     "test:remote-output-parser": "node scripts/test-remote-output-parser.js",
     "test:terminal-capture": "node scripts/test-terminal-capture.js",

@@ -11,7 +11,7 @@ const SPINNER_PATTERN = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
 const FINAL_PREFIX_PATTERN = /^\s*[•●]\s+/;
 const FINAL_MARKER_PATTERN = /[•●]\s+/;
 const INTRO_LINE_PATTERN = /(?:Use \/skills to list available skills|type \/help|press enter to continue)/i;
-const ACTIVITY_LINE_PATTERN = /^(?:Ran|Explored|Read|Edited|Updated|Added|Removed|Created|Deleted|Opened|Searched|Found|Checked|Applied|Listed|Viewed|Wrote)\b/i;
+const ACTIVITY_LINE_PATTERN = /^(?:Ran|Waited|Explored|Read|Edited|Updated|Added|Removed|Created|Deleted|Opened|Searched|Found|Checked|Applied|Listed|Viewed|Wrote)\b/i;
 const RUNNING_STATUS_PATTERN = /^(?:Working|Thinking|Reading|Writing|Finding|Searching|Running|Checking|Applying|Planning)\b/i;
 const PROGRESS_ITEM_LIMIT = 32;
 const STREAM_FINAL_SETTLE_MS = 1500;
@@ -227,7 +227,7 @@ class RemoteSessionController {
     state.replyPanel = message.replyPanel;
     state.createReplyStream = message.createReplyStream;
     state.onTurnFinished = message.onTurnFinished;
-    await this.flushPendingReply(state);
+    this.discardPendingReply(state, 'new_user_message');
     this.refreshVisualBusyState(state, 'incoming_message');
     if (isVisualSessionBusy(state)) {
       const approval = this.getApprovalPrompt(state);
@@ -2254,10 +2254,10 @@ function formatVisualSnapshot(snapshot, inputText = '', options = {}) {
 
   if (lines.length === 0) return '';
 
-  const promptIndex = findLastSubmittedPrompt(lines, input);
-  if (input && promptIndex < 0 && !options.allowMissingPrompt) return '';
+  const turnStartIndex = findVisualTurnStartIndex(lines, input, options);
+  if (input && turnStartIndex < 0 && !options.allowMissingPrompt) return '';
   const afterPrompt = trimExternalNativeSlashPageFromTurnLines(
-    promptIndex >= 0 ? lines.slice(promptIndex + 1) : lines
+    turnStartIndex >= 0 ? lines.slice(turnStartIndex + 1) : lines
   );
   const blocks = splitVisualBlocks(afterPrompt);
   const candidates = blocks
@@ -2413,10 +2413,10 @@ function formatVisualProgressSnapshot(snapshot, inputText = '', options = {}) {
     .filter((record) => record.text.trim())
     .filter((record) => !BOX_ONLY_PATTERN.test(record.text.trim()));
   const lines = records.map((record) => record.text);
-  const promptIndex = findLastSubmittedPrompt(lines, input);
-  if (input && promptIndex < 0 && !options.allowMissingPrompt) return '';
+  const turnStartIndex = findVisualTurnStartIndex(lines, input, options);
+  if (input && turnStartIndex < 0 && !options.allowMissingPrompt) return '';
   const afterPrompt = trimExternalNativeSlashPageFromTurnRecords(
-    promptIndex >= 0 ? records.slice(promptIndex + 1) : records
+    turnStartIndex >= 0 ? records.slice(turnStartIndex + 1) : records
   );
   return renderCodexProgressState(
     parseCodexProgressState(afterPrompt, {
@@ -2433,13 +2433,13 @@ function classifyVisualTurnOutput(snapshot, inputText = '', options = {}) {
     .filter((record) => record.text.trim())
     .filter((record) => !BOX_ONLY_PATTERN.test(record.text.trim()));
   const lines = records.map((record) => record.text);
-  const promptIndex = findLastSubmittedPrompt(lines, input);
-  if (input && promptIndex < 0 && !options.allowMissingPrompt) {
+  const turnStartIndex = findVisualTurnStartIndex(lines, input, options);
+  if (input && turnStartIndex < 0 && !options.allowMissingPrompt) {
     return emptyTurnOutputClassification();
   }
 
   const afterPrompt = trimExternalNativeSlashPageFromTurnRecords(
-    promptIndex >= 0 ? records.slice(promptIndex + 1) : records
+    turnStartIndex >= 0 ? records.slice(turnStartIndex + 1) : records
   );
   const approval = extractApprovalPrompt(afterPrompt.map((record) => record.text));
   const entries = afterPrompt
@@ -2524,7 +2524,7 @@ function classifyVisualTurnOutput(snapshot, inputText = '', options = {}) {
 
     if (
       entry.isBullet &&
-      (hasStructuredProgress || hasRunningStatus) &&
+      (hasStructuredProgress || hasRunningStatus || options.allowMissingPrompt) &&
       isUsefulProgressNote(entry.value)
     ) {
       pushUniqueString(classified.explanations, entry.value);
@@ -2574,14 +2574,6 @@ function renderClassifiedTurnStream(classified, options = {}) {
 
   for (const explanation of classified.explanations || []) {
     progressLines.push(`- ${explanation}`);
-  }
-
-  const seenActivitySummaries = new Set();
-  for (const activity of classified.activities || []) {
-    const summary = String(activity.summary || '').trim();
-    if (!summary || seenActivitySummaries.has(summary)) continue;
-    seenActivitySummaries.add(summary);
-    progressLines.push(`- ${withRemoteCodexColorMarker(summary, classifiedActivityColor(activity), options)}`);
   }
 
   for (const warning of classified.warnings || []) {
@@ -3663,13 +3655,7 @@ function parseCodexProgressState(lines, options = {}) {
     }
 
     if (ACTIVITY_LINE_PATTERN.test(entry.value)) {
-      current = addProgressItem(
-        state,
-        'activity',
-        formatProgressActivity(entry.value),
-        entry,
-        { allowDetails: false }
-      );
+      current = null;
       continue;
     }
 
@@ -3685,7 +3671,7 @@ function parseCodexProgressState(lines, options = {}) {
 
     if (
       entry.isBullet &&
-      (hasStructuredProgress || hasRunningStatus) &&
+      (hasStructuredProgress || hasRunningStatus || options.allowMissingPrompt) &&
       isUsefulProgressNote(entry.value)
     ) {
       current = addProgressItem(state, 'note', entry.value, entry);
@@ -4246,6 +4232,40 @@ function findLastSubmittedPrompt(lines, input) {
     if (promptText.length >= 12 && input.includes(promptText)) return index;
   }
 
+  return -1;
+}
+
+function findVisualTurnStartIndex(lines, input, options = {}) {
+  const promptIndex = findLastSubmittedPrompt(lines, input);
+  if (promptIndex >= 0) return promptIndex;
+  if (!options.allowMissingPrompt) return -1;
+
+  const remoteInputIndex = findLastRemoteInputNoticeIndex(lines, input);
+  if (remoteInputIndex >= 0) return remoteInputIndex;
+
+  return -1;
+}
+
+function findLastRemoteInputNoticeIndex(lines, input) {
+  const normalizedInput = normalizeComparableText(input);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = String(lines[index] || '').trim();
+    if (!/^\[Remote Codex\]/i.test(line)) continue;
+    if (!normalizedInput) return index;
+
+    const windowText = normalizeComparableText(
+      lines.slice(index, Math.min(lines.length, index + 5)).join(' ')
+    );
+    if (windowText.includes(normalizedInput)) return index;
+
+    const noticeText = normalizeComparableText(
+      line.replace(/^\[Remote Codex\]\s*(?:Feishu\s+\S+:\s*)?/i, '')
+    );
+    if (noticeText.length >= 12 && normalizedInput.includes(noticeText)) {
+      return index;
+    }
+    return index;
+  }
   return -1;
 }
 

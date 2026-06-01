@@ -29,9 +29,9 @@ function smokeBulletProgress() {
 
   const progress = formatVisualProgressSnapshot(snapshot, input);
   assert.match(progress, /- 我先检查飞书消息解析入口/);
-  assert.match(progress, /- Read src\/plugins\/feishu\/index\.js/);
-  assert.match(progress, /- Found the parser only keeps plain text content\./);
-  assert.match(progress, /- Edited src\/plugins\/feishu\/index\.js/);
+  assert.doesNotMatch(progress, /Read src\/plugins\/feishu\/index\.js/);
+  assert.doesNotMatch(progress, /Found the parser only keeps plain text content\./);
+  assert.doesNotMatch(progress, /Edited src\/plugins\/feishu\/index\.js/);
 
   const finalSnapshot = [
     `› ${input}`,
@@ -59,10 +59,7 @@ function smokeBulletProgress() {
   const renderedReviewProgress = formatVisualProgressSnapshot(reviewProgress, reviewInput);
   assert.match(renderedReviewProgress, /- 基础检查都过了/);
   assert.match(renderedReviewProgress, /还有普通文本兜底/);
-  assert.match(renderedReviewProgress, /- Ran node -c scripts\/smoke-remote-streaming\.js/);
-  assert.match(renderedReviewProgress, /- Ran node -e "const \{formatVisualSnapshot,formatVisualProgressSnapshot\}=require/);
-  assert.match(renderedReviewProgress, /- Explored/);
-  assert.doesNotMatch(renderedReviewProgress, /│ input|Search isLikelyProgressMarkerText/);
+  assert.doesNotMatch(renderedReviewProgress, /node -c|node -e|Explored|│ input|Search isLikelyProgressMarkerText/);
 
   const styledReviewProgress = {
     lines: [
@@ -78,21 +75,18 @@ function smokeBulletProgress() {
     styledReviewProgress,
     reviewInput
   );
-  assert.match(renderedStyledProgress, /- Ran node -c scripts\/smoke-remote-streaming\.js/);
+  assert.equal(renderedStyledProgress, '');
   const renderedStyledColorProgress = formatVisualProgressSnapshot(
     styledReviewProgress,
     reviewInput,
     { colorMarkers: true }
   );
-  assert.match(
-    renderedStyledColorProgress,
-    /<!--remote-codex-color:rgba\(96,165,250,1\)-->/
-  );
+  assert.equal(renderedStyledColorProgress, '');
 
   const parsedStyledProgress = parseCodexProgressState(
     styledReviewProgress.lines.slice(1)
   );
-  assert.equal(parsedStyledProgress.items[0].colorRole, 'command');
+  assert.equal(parsedStyledProgress.items.length, 0);
   assert.equal(
     classifyTerminalColorRole({ fgMode: 'palette', fg: 2 }),
     'success'
@@ -110,9 +104,7 @@ function smokeBulletProgress() {
     ''
   );
   assert.match(fallbackProgress, /- 基础检查都过了/);
-  assert.match(fallbackProgress, /- (?:<!--remote-codex-color:[^>]+-->)?Ran node -c scripts\/smoke-remote-streaming\.js/);
-  assert.match(fallbackProgress, /- (?:<!--remote-codex-color:[^>]+-->)?Ran node -e "const \{formatVisualSnapshot,formatVisualProgressSnapshot\}=require/);
-  assert.doesNotMatch(fallbackProgress, /Search isLikelyProgressMarkerText/);
+  assert.doesNotMatch(fallbackProgress, /node -c|node -e|Search isLikelyProgressMarkerText/);
 
   const classifiedStreamProgress = controller.formatStreamingStateOutput(
     {
@@ -126,11 +118,9 @@ function smokeBulletProgress() {
   );
   assert.match(classifiedStreamProgress, /- 基础检查都过了/);
   assert.match(classifiedStreamProgress, /还有普通文本兜底/);
-  assert.match(classifiedStreamProgress, /- (?:<!--remote-codex-color:[^>]+-->)?Ran node -c scripts\/smoke-remote-streaming\.js/);
-  assert.match(classifiedStreamProgress, /- (?:<!--remote-codex-color:[^>]+-->)?Explored/);
   assert.doesNotMatch(
     classifiedStreamProgress,
-    /Search isLikelyProgressMarkerText/
+    /node -c|node -e|Explored|Search isLikelyProgressMarkerText/
   );
 }
 
@@ -163,11 +153,11 @@ async function smokeWorkingHeartbeat() {
   await controller.startReplyStream(state, {});
   assert.match(initialText, /\*\*进度\*\*\n- Working \(\d+s\)/);
 
-  state.lastStreamText = '**进度**\n- Ran npm run test:remote-output-parser';
+  state.lastStreamText = '**进度**\n- 我正在验证最终回复不会重复发送。';
   controller.sendWorkingHeartbeat(state);
   await new Promise((resolve) => setImmediate(resolve));
   assert.match(updates.at(-1), /\*\*进度\*\*\n- Working \(\d+s\)/);
-  assert.match(updates.at(-1), /- Ran npm run test:remote-output-parser/);
+  assert.match(updates.at(-1), /- 我正在验证最终回复不会重复发送。/);
   controller.clearStreamHeartbeat(state);
 }
 

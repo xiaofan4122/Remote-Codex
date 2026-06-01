@@ -13,6 +13,7 @@ const { RawOutputRecorder } = require('./rawOutputRecorder');
 const { readCaptureView } = require('./terminalCaptureViewer');
 const { parseLaunchOptions, buildCodexArgs } = require('./launchOptions');
 const { buildResumeHint } = require('./resumeHint');
+const { buildRemoteInputNotice } = require('./remoteVisualNotice');
 
 let mainWindow;
 let currentSession;
@@ -63,7 +64,11 @@ function createPluginRuntime() {
     },
     onRemoteInput: ({ message, text, state }) => {
       if (!state.shared) return;
-      writeVisualNotice(`Feishu ${message.userId || 'user'}: ${text}`);
+      writeVisualNotice({
+        source: 'Feishu',
+        userId: message.userId || 'user',
+        text
+      });
     }
   });
   pluginManager = new PluginManager({
@@ -184,12 +189,14 @@ function installContextMenu(window) {
   });
 }
 
-function writeVisualNotice(message) {
-  const safeMessage = String(message || '').replace(/\r/g, '').trim();
-  if (!safeMessage) return;
+function writeVisualNotice(notice) {
+  const data = buildRemoteInputNotice({
+    ...notice,
+    cols: currentSession?.cols || 100
+  });
   mainWindow?.webContents.send(
     'terminal:data',
-    `\r\n\x1b[38;5;111m[Remote Codex] ${safeMessage}\x1b[0m\r\n`
+    data
   );
 }
 
