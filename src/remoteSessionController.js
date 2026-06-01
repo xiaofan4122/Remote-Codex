@@ -1988,10 +1988,8 @@ class RemoteSessionController {
       clearTimeout(state.pendingReplyTimer);
       state.pendingReplyTimer = null;
     }
-    if (state.replyStream && state.lastReplyText) {
-      state.replyStream.finish(state.lastReplyText).catch((error) => {
-        this.logger.warn?.('Remote reply stream finish failed:', error.message);
-      });
+    if (state.replyStream && typeof state.replyStream.unregister === 'function') {
+      state.replyStream.unregister();
     }
     state.outputBuffer = '';
     state.lastReplyText = '';

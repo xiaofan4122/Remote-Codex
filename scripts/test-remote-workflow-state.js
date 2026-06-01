@@ -228,6 +228,8 @@ async function testNewInputDiscardsPendingFinalReply() {
   const writes = [];
   const replies = [];
   let finished = 0;
+  let staleStreamFinished = 0;
+  let staleStreamUnregistered = 0;
   const state = createState({
     turnStartedAt: Date.now() - 40 * 1000,
     snapshot: [
@@ -239,8 +241,17 @@ async function testNewInputDiscardsPendingFinalReply() {
     }
   });
   state.lastInputText = 'old task';
+  state.lastReplyText = 'old final reply';
   state.pendingReplyText = 'old final reply';
   state.pendingReplyTimer = setTimeout(() => {}, 10000);
+  state.replyStream = {
+    async finish() {
+      staleStreamFinished += 1;
+    },
+    unregister() {
+      staleStreamUnregistered += 1;
+    }
+  };
   controller.sessions.set('feishu:chat', state);
 
   await controller.handleMessage({
@@ -256,6 +267,8 @@ async function testNewInputDiscardsPendingFinalReply() {
 
   assert.deepEqual(replies, []);
   assert.equal(finished, 0);
+  assert.equal(staleStreamFinished, 0);
+  assert.equal(staleStreamUnregistered, 1);
   assert.equal(state.pendingReplyText, '');
   assert.equal(state.pendingReplyTimer, null);
   assert.equal(writes.length, 1);
