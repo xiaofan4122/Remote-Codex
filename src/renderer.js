@@ -5,10 +5,12 @@ const cwdElement = document.getElementById('cwd');
 const chooseDirButton = document.getElementById('chooseDir');
 const restartButton = document.getElementById('restart');
 const settingsButton = document.getElementById('settings');
+const captureLogsButton = document.getElementById('captureLogs');
 const settingsPanel = document.getElementById('settingsPanel');
 const settingsForm = document.getElementById('settingsForm');
 const closeSettingsButton = document.getElementById('closeSettings');
 const languageSelect = document.getElementById('uiLanguage');
+const debugPanelCheckbox = document.getElementById('debugPanelEnabled');
 const rawOutputLogCheckbox = document.getElementById('rawOutputLogEnabled');
 const openRawOutputLogButton = document.getElementById('openRawOutputLog');
 const connectFeishuButton = document.getElementById('connectFeishu');
@@ -18,6 +20,26 @@ const feishuConnectState = document.getElementById('feishuConnectState');
 const feishuConnectQr = document.getElementById('feishuConnectQr');
 const feishuConnectLink = document.getElementById('feishuConnectLink');
 const settingsStatus = document.getElementById('settingsStatus');
+const captureLogPanel = document.getElementById('captureLogPanel');
+const captureLogPath = document.getElementById('captureLogPath');
+const captureLogSession = document.getElementById('captureLogSession');
+const captureLogType = document.getElementById('captureLogType');
+const captureLogAutoRefresh = document.getElementById('captureLogAutoRefresh');
+const captureLogIncludeNoise = document.getElementById('captureLogIncludeNoise');
+const captureLogStatus = document.getElementById('captureLogStatus');
+const captureLogStats = document.getElementById('captureLogStats');
+const captureLogEvents = document.getElementById('captureLogEvents');
+const captureLogDetailTitle = document.getElementById('captureLogDetailTitle');
+const captureLogDetail = document.getElementById('captureLogDetail');
+const captureLogContentTab = document.getElementById('captureLogContentTab');
+const captureLogMetadataTab = document.getElementById('captureLogMetadataTab');
+const refreshCaptureLogsButton = document.getElementById('refreshCaptureLogs');
+const openCaptureLogFileButton = document.getElementById('openCaptureLogFile');
+const closeCaptureLogsButton = document.getElementById('closeCaptureLogs');
+const debugPanel = document.getElementById('debugPanel');
+const debugPanelUpdated = document.getElementById('debugPanelUpdated');
+const debugPanelBody = document.getElementById('debugPanelBody');
+const closeDebugPanelButton = document.getElementById('closeDebugPanel');
 
 let currentCwd = null;
 let currentConfig = null;
@@ -28,6 +50,13 @@ let fitFrame = null;
 let snapshotTimer = null;
 let lastSize = { cols: 0, rows: 0 };
 let scrollbarSyncing = false;
+let captureLogView = null;
+let selectedCaptureEventId = '';
+let captureLogDetailMode = 'content';
+let captureLogRefreshTimer = null;
+let debugPanelRefreshTimer = null;
+const TERMINAL_MIN_COLS = 2;
+const TERMINAL_MIN_ROWS = 1;
 
 const I18N = {
   'zh-CN': {
@@ -35,17 +64,34 @@ const I18N = {
     openProject: '打开项目',
     restartCodex: '重启 Codex',
     settings: '设置',
+    captureLogs: '采集日志',
     close: '关闭',
     interface: '界面',
     language: '语言',
     languageChinese: '中文',
     languageEnglish: 'English',
+    debugPanel: '状态调试',
+    debugPanelEnabled: '显示状态调试面板',
+    debugPanelUnavailable: '状态暂不可用。',
     terminalScrollback: '终端滚动历史',
     defaultWorkingDirectory: '默认工作目录',
     rawOutputLogEnabled: '记录 Codex 原始输出',
     openLog: '打开日志',
     rawOutputLogOpened: '日志已打开。',
     rawOutputLogOpenFailed: '打开日志失败。',
+    refresh: '刷新',
+    openRawFile: '打开原始文件',
+    session: '会话',
+    allSessions: '全部会话',
+    eventType: '事件类型',
+    allEventTypes: '全部类型',
+    autoRefresh: '自动刷新',
+    includeTerminalControls: '显示终端控制事件',
+    content: '内容',
+    metadata: '元数据',
+    selectEvent: '选择事件查看详情',
+    captureEmpty: '暂无采集事件。',
+    captureLoadFailed: '加载采集日志失败。',
     connection: '连接',
     notConnected: '未连接。',
     connectFeishu: '连接飞书',
@@ -64,7 +110,8 @@ const I18N = {
     failedCancelFeishuAuthorization: '取消飞书授权失败。',
     configured: '已配置：{value}',
     connected: '已连接：{value}',
-    feishuConnectedSaved: '飞书已连接并保存。',
+    feishuConnectedSaved: '飞书已连接并保存。请在飞书开发者后台配置并发布悬浮菜单。',
+    feishuBotMenuHint: '机器人菜单需在飞书开发者后台配置并发布：状态 /status、历史会话 /resume、权限模式 /permission。建议使用悬浮菜单和“发送文字消息”动作。',
     feishuStatusStarting: '正在准备飞书授权...',
     feishuStatusWaiting: '打开飞书授权链接继续。',
     feishuStatusPolling: '正在等待飞书授权...',
@@ -79,17 +126,34 @@ const I18N = {
     openProject: 'Open Project',
     restartCodex: 'Restart Codex',
     settings: 'Settings',
+    captureLogs: 'Capture Logs',
     close: 'Close',
     interface: 'Interface',
     language: 'Language',
     languageChinese: '中文',
     languageEnglish: 'English',
+    debugPanel: 'State Debug',
+    debugPanelEnabled: 'Show state debug panel',
+    debugPanelUnavailable: 'State is not available.',
     terminalScrollback: 'Terminal scrollback',
     defaultWorkingDirectory: 'Default working directory',
     rawOutputLogEnabled: 'Record raw Codex output',
     openLog: 'Open Log',
     rawOutputLogOpened: 'Log opened.',
     rawOutputLogOpenFailed: 'Failed to open log.',
+    refresh: 'Refresh',
+    openRawFile: 'Open Raw File',
+    session: 'Session',
+    allSessions: 'All sessions',
+    eventType: 'Event type',
+    allEventTypes: 'All types',
+    autoRefresh: 'Auto refresh',
+    includeTerminalControls: 'Show terminal control events',
+    content: 'Content',
+    metadata: 'Metadata',
+    selectEvent: 'Select an event to inspect',
+    captureEmpty: 'No capture events.',
+    captureLoadFailed: 'Failed to load capture log.',
     connection: 'Connection',
     notConnected: 'Not connected.',
     connectFeishu: 'Connect Feishu',
@@ -108,7 +172,8 @@ const I18N = {
     failedCancelFeishuAuthorization: 'Failed to cancel Feishu authorization.',
     configured: 'Configured: {value}',
     connected: 'Connected: {value}',
-    feishuConnectedSaved: 'Feishu connected and saved.',
+    feishuConnectedSaved: 'Feishu connected and saved. Configure and publish the floating bot menu in the Feishu Developer Console.',
+    feishuBotMenuHint: 'Configure and publish the bot menu in the Feishu Developer Console: Status /status, Sessions /resume, Permissions /permission. Use the floating menu and Send text message actions.',
     feishuStatusStarting: 'Preparing Feishu authorization...',
     feishuStatusWaiting: 'Open the Feishu authorization link to continue.',
     feishuStatusPolling: 'Waiting for Feishu authorization...',
@@ -160,7 +225,16 @@ term.loadAddon(fitAddon);
 term.open(terminalElement);
 
 function fit() {
-  fitAddon.fit();
+  const size = proposeTerminalSize();
+  if (size) {
+    if (term.cols !== size.cols || term.rows !== size.rows) {
+      term._core?._renderService?.clear?.();
+      term.resize(size.cols, size.rows);
+      term.refresh(0, Math.max(0, term.rows - 1));
+    }
+  } else {
+    fitAddon.fit();
+  }
   updateTerminalScrollbar();
 
   if (term.cols === lastSize.cols && term.rows === lastSize.rows) {
@@ -172,6 +246,52 @@ function fit() {
     rows: term.rows
   };
   window.codexShell.resize(lastSize);
+}
+
+function proposeTerminalSize() {
+  const cellSize = getTerminalCellSize();
+  const xtermElement = term.element;
+  if (!cellSize || !xtermElement || !terminalElement.clientWidth || !terminalElement.clientHeight) {
+    return null;
+  }
+
+  const xtermStyle = window.getComputedStyle(xtermElement);
+  const horizontalPadding =
+    parseCssPixels(xtermStyle.paddingLeft) + parseCssPixels(xtermStyle.paddingRight);
+  const verticalPadding =
+    parseCssPixels(xtermStyle.paddingTop) + parseCssPixels(xtermStyle.paddingBottom);
+  const availableWidth = Math.max(0, terminalElement.clientWidth - horizontalPadding);
+  const availableHeight = Math.max(0, terminalElement.clientHeight - verticalPadding);
+
+  return {
+    cols: Math.max(TERMINAL_MIN_COLS, Math.floor(availableWidth / cellSize.width)),
+    rows: Math.max(TERMINAL_MIN_ROWS, Math.floor(availableHeight / cellSize.height))
+  };
+}
+
+function getTerminalCellSize() {
+  const cell = term._core?._renderService?.dimensions?.css?.cell;
+  if (cell?.width > 0 && cell?.height > 0) {
+    return {
+      width: cell.width,
+      height: cell.height
+    };
+  }
+
+  const screen = terminalElement.querySelector('.xterm-screen');
+  if (screen?.clientWidth > 0 && screen?.clientHeight > 0 && term.cols > 0 && term.rows > 0) {
+    return {
+      width: screen.clientWidth / term.cols,
+      height: screen.clientHeight / term.rows
+    };
+  }
+
+  return null;
+}
+
+function parseCssPixels(value) {
+  const parsed = Number.parseFloat(String(value || '0'));
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function requestFit() {
@@ -198,6 +318,7 @@ window.codexShell.onCwd((cwd) => {
 window.codexShell.onConfigUpdated((config) => {
   currentConfig = config;
   setLanguage(config.ui?.language);
+  syncDebugPanel(config);
   if (settingsPanel.getAttribute('aria-hidden') === 'false') {
     populateSettings(config);
   }
@@ -228,7 +349,9 @@ function scheduleTerminalSnapshot() {
     snapshotTimer = null;
     window.codexShell.snapshot({
       scrollback: readTerminalSnapshot(),
-      viewport: readTerminalViewportSnapshot()
+      viewport: readTerminalViewportSnapshot(),
+      styledScrollback: readTerminalStyledSnapshot(),
+      styledViewport: readTerminalStyledViewportSnapshot()
     });
   }, 40);
 }
@@ -296,6 +419,11 @@ function readTerminalSnapshot() {
   return lines.join('\n');
 }
 
+function readTerminalStyledSnapshot() {
+  const buffer = term.buffer.active;
+  return readStyledTerminalRange(Math.max(0, buffer.length - 300), buffer.length);
+}
+
 function readTerminalViewportSnapshot() {
   const buffer = term.buffer.active;
   const lines = [];
@@ -326,6 +454,105 @@ function readTerminalViewportSnapshot() {
   return lines.join('\n');
 }
 
+function readTerminalStyledViewportSnapshot() {
+  const buffer = term.buffer.active;
+  const start = Math.max(0, buffer.viewportY);
+  const end = Math.min(buffer.length, start + term.rows);
+  return readStyledTerminalRange(start, end);
+}
+
+function readStyledTerminalRange(start, end) {
+  const buffer = term.buffer.active;
+  const lines = [];
+  let logicalLine = null;
+
+  for (let index = start; index < end; index += 1) {
+    const line = buffer.getLine(index);
+    if (!line) continue;
+
+    const physicalLine = readStyledTerminalLine(line);
+    if (line.isWrapped) {
+      logicalLine = appendStyledLine(logicalLine, physicalLine);
+      continue;
+    }
+
+    if (logicalLine?.text) {
+      lines.push(logicalLine);
+    }
+    logicalLine = physicalLine;
+  }
+
+  if (logicalLine?.text) {
+    lines.push(logicalLine);
+  }
+
+  return { lines };
+}
+
+function readStyledTerminalLine(line) {
+  const text = line.translateToString(true);
+  const maxCells = Math.min(line.length, term.cols);
+  let firstStyle = null;
+  let firstChar = '';
+  let bulletStyle = null;
+
+  for (let x = 0; x < maxCells; x += 1) {
+    const cell = line.getCell(x);
+    const chars = cell?.getChars?.() || '';
+    if (!chars || !chars.trim()) continue;
+
+    const style = serializeTerminalCellStyle(cell);
+    firstStyle = style;
+    firstChar = chars;
+    if (/^[•●◦○■]$/.test(chars)) {
+      bulletStyle = style;
+    }
+    break;
+  }
+
+  return {
+    text,
+    firstChar,
+    firstStyle,
+    bulletStyle
+  };
+}
+
+function appendStyledLine(current, next) {
+  if (!current) return next;
+  return {
+    text: `${current.text || ''}${next?.text || ''}`,
+    firstChar: current.firstChar || next?.firstChar || '',
+    firstStyle: current.firstStyle || next?.firstStyle || null,
+    bulletStyle: current.bulletStyle || next?.bulletStyle || null
+  };
+}
+
+function serializeTerminalCellStyle(cell) {
+  if (!cell) return null;
+  return {
+    fgMode: getTerminalColorMode(cell, 'fg'),
+    fg: Number(cell.getFgColor?.() || 0),
+    bgMode: getTerminalColorMode(cell, 'bg'),
+    bg: Number(cell.getBgColor?.() || 0),
+    bold: Boolean(cell.isBold?.()),
+    dim: Boolean(cell.isDim?.()),
+    italic: Boolean(cell.isItalic?.())
+  };
+}
+
+function getTerminalColorMode(cell, channel) {
+  if (channel === 'fg') {
+    if (cell.isFgRGB?.()) return 'rgb';
+    if (cell.isFgPalette?.()) return 'palette';
+    return 'default';
+  }
+
+  if (cell.isBgRGB?.()) return 'rgb';
+  if (cell.isBgPalette?.()) return 'palette';
+  return 'default';
+}
+
 chooseDirButton.addEventListener('click', async () => {
   await window.codexShell.chooseDirectory();
   setTimeout(requestFit, 100);
@@ -342,8 +569,46 @@ settingsButton.addEventListener('click', async () => {
   await loadSettings();
 });
 
+captureLogsButton.addEventListener('click', async () => {
+  captureLogPanel.setAttribute('aria-hidden', 'false');
+  await loadCaptureLogView();
+  scheduleCaptureLogRefresh();
+});
+
+closeCaptureLogsButton.addEventListener('click', closeCaptureLogPanel);
+
+captureLogPanel.addEventListener('click', (event) => {
+  if (event.target === captureLogPanel) {
+    closeCaptureLogPanel();
+  }
+});
+
+refreshCaptureLogsButton.addEventListener('click', loadCaptureLogView);
+
+openCaptureLogFileButton.addEventListener('click', async () => {
+  try {
+    await window.codexShell.openRawOutputLog();
+  } catch (error) {
+    captureLogStatus.textContent = error.message || t('rawOutputLogOpenFailed');
+  }
+});
+
+captureLogSession.addEventListener('change', loadCaptureLogView);
+captureLogType.addEventListener('change', renderCaptureLogEvents);
+captureLogAutoRefresh.addEventListener('change', scheduleCaptureLogRefresh);
+captureLogIncludeNoise.addEventListener('change', loadCaptureLogView);
+captureLogContentTab.addEventListener('click', () => setCaptureLogDetailMode('content'));
+captureLogMetadataTab.addEventListener('click', () => setCaptureLogDetailMode('metadata'));
+
 closeSettingsButton.addEventListener('click', () => {
   settingsPanel.setAttribute('aria-hidden', 'true');
+});
+
+window.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  if (captureLogPanel.getAttribute('aria-hidden') === 'false') {
+    closeCaptureLogPanel();
+  }
 });
 
 settingsPanel.addEventListener('click', (event) => {
@@ -418,6 +683,19 @@ openRawOutputLogButton.addEventListener('click', async () => {
   }
 });
 
+closeDebugPanelButton.addEventListener('click', async () => {
+  if (!currentConfig) {
+    currentConfig = await window.codexShell.getConfig();
+  }
+  const nextConfig = structuredClone(currentConfig);
+  nextConfig.ui = nextConfig.ui || {};
+  nextConfig.ui.debugPanelEnabled = false;
+  const result = await window.codexShell.saveConfig(nextConfig);
+  currentConfig = result.config;
+  populateSettings(currentConfig);
+  syncDebugPanel(currentConfig);
+});
+
 window.addEventListener('resize', requestFit);
 new ResizeObserver(requestFit).observe(terminalElement);
 setTimeout(requestFit, 100);
@@ -425,6 +703,7 @@ setTimeout(requestFit, 100);
 window.codexShell.getConfig().then((config) => {
   currentConfig = config;
   setLanguage(config.ui?.language);
+  syncDebugPanel(config);
 }).catch(() => {
   setLanguage(currentLanguage);
 });
@@ -447,6 +726,7 @@ async function saveSettings() {
   const result = await window.codexShell.saveConfig(nextConfig);
   currentConfig = result.config;
   populateSettings(currentConfig);
+  syncDebugPanel(currentConfig);
 
   if (result.pluginError) {
     setSettingsStatus(t('savedPluginError', { error: result.pluginError }));
@@ -459,6 +739,7 @@ async function saveSettings() {
 function populateSettings(config) {
   setLanguage(config.ui?.language);
   setValue('uiLanguage', currentLanguage);
+  debugPanelCheckbox.checked = Boolean(config.ui?.debugPanelEnabled);
   setValue('codexDefaultCwd', config.codex?.defaultCwd || '');
   rawOutputLogCheckbox.checked = Boolean(config.remoteControl?.rawOutputLogEnabled);
   renderFeishuConfiguredState(config);
@@ -484,6 +765,7 @@ function collectSettings(baseConfig) {
   next.plugins.feishu = next.plugins.feishu || {};
 
   next.ui.language = normalizeLanguage(getValue('uiLanguage'));
+  next.ui.debugPanelEnabled = debugPanelCheckbox.checked;
   next.codex.defaultCwd = getValue('codexDefaultCwd');
   next.remoteControl.rawOutputLogEnabled = rawOutputLogCheckbox.checked;
 
@@ -507,6 +789,279 @@ function setValue(id, value) {
 
 function setSettingsStatus(message) {
   settingsStatus.textContent = message;
+}
+
+function syncDebugPanel(config = currentConfig) {
+  const enabled = Boolean(config?.ui?.debugPanelEnabled);
+  debugPanel.setAttribute('aria-hidden', enabled ? 'false' : 'true');
+  if (enabled) {
+    refreshDebugPanel();
+    scheduleDebugPanelRefresh();
+  } else {
+    clearDebugPanelRefresh();
+  }
+}
+
+function scheduleDebugPanelRefresh() {
+  clearDebugPanelRefresh();
+  debugPanelRefreshTimer = setInterval(refreshDebugPanel, 1000);
+}
+
+function clearDebugPanelRefresh() {
+  if (debugPanelRefreshTimer) {
+    clearInterval(debugPanelRefreshTimer);
+    debugPanelRefreshTimer = null;
+  }
+}
+
+async function refreshDebugPanel() {
+  if (debugPanel.getAttribute('aria-hidden') === 'true') return;
+  try {
+    const state = await window.codexShell.getDebugState();
+    renderDebugPanel(state);
+  } catch (error) {
+    debugPanelUpdated.textContent = t('debugPanelUnavailable');
+    debugPanelBody.textContent = error.message || t('debugPanelUnavailable');
+  }
+}
+
+function renderDebugPanel(state = {}) {
+  debugPanelUpdated.textContent = state.at ? formatEventTime(state.at) : '--';
+  debugPanelBody.replaceChildren();
+
+  const summary = document.createElement('dl');
+  summary.className = 'debug-summary';
+  const session = state.session || {};
+  const remote = state.remote || {};
+  const detection = state.detection || {};
+  const items = [
+    ['phase', state.phase || 'unknown'],
+    ['busy', String(Boolean(state.busy))],
+    ['remote', state.hasRemoteState ? 'attached' : 'visual only'],
+    ['session', session.id ? shortId(session.id) : 'none'],
+    ['cwd', session.cwd || currentCwd || ''],
+    ['cursor', session.cursor ?? ''],
+    ['native', remote.nativeCommand || ''],
+    ['turnStarted', remote.turnStartedAt ? formatElapsed(remote.turnStartedAt) : ''],
+    ['idlePrompt', String(Boolean(detection.visibleIdlePrompt))],
+    ['activeSignals', String(Boolean(detection.activeVisualIndicators))],
+    ['approval', detection.approval ? 'yes' : 'no']
+  ];
+
+  for (const [label, value] of items) {
+    if (value === '') continue;
+    const termElement = document.createElement('dt');
+    termElement.textContent = label;
+    const detailElement = document.createElement('dd');
+    detailElement.textContent = String(value);
+    summary.append(termElement, detailElement);
+  }
+  debugPanelBody.append(summary);
+
+  if (remote.lastInputText) {
+    debugPanelBody.append(buildDebugBlock('last input', remote.lastInputText));
+  }
+  if (detection.approval?.question) {
+    debugPanelBody.append(buildDebugBlock('approval', detection.approval.question));
+  }
+  debugPanelBody.append(buildDebugBlock('viewport', state.text?.viewportTail || ''));
+  debugPanelBody.append(buildDebugBlock('output tail', state.text?.lastOutputTail || ''));
+}
+
+function buildDebugBlock(title, text) {
+  const section = document.createElement('section');
+  section.className = 'debug-block';
+  const heading = document.createElement('h3');
+  heading.textContent = title;
+  const body = document.createElement('pre');
+  body.textContent = text || '--';
+  section.append(heading, body);
+  return section;
+}
+
+function formatElapsed(startedAt) {
+  const value = Number(startedAt) || Date.parse(startedAt);
+  if (!value) return '';
+  const seconds = Math.max(0, Math.floor((Date.now() - value) / 1000));
+  return `${seconds}s ago`;
+}
+
+async function loadCaptureLogView() {
+  captureLogStatus.textContent = t('loadingSettings');
+  try {
+    const previousSession = captureLogSession.value;
+    captureLogView = await window.codexShell.getCaptureLogView({
+      sessionId: previousSession,
+      includeNoise: captureLogIncludeNoise.checked,
+      limit: 800
+    });
+    renderCaptureLogView(previousSession);
+  } catch (error) {
+    captureLogStatus.textContent = error.message || t('captureLoadFailed');
+  }
+}
+
+function renderCaptureLogView(previousSession = '') {
+  if (!captureLogView) return;
+  captureLogPath.textContent = captureLogView.path || '';
+  fillSelect(
+    captureLogSession,
+    [{ value: '', label: t('allSessions') }].concat(
+      (captureLogView.sessions || []).map((session) => ({
+        value: session.sessionId,
+        label: `${shortId(session.sessionId)} (${session.events})`
+      }))
+    ),
+    previousSession
+  );
+  fillSelect(
+    captureLogType,
+    [{ value: '', label: t('allEventTypes') }].concat(
+      Object.keys(captureLogView.typeCounts || {}).sort().map((type) => ({
+        value: type,
+        label: `${type} (${captureLogView.typeCounts[type]})`
+      }))
+    ),
+    captureLogType.value
+  );
+  const errorCount = (captureLogView.readErrors || []).length;
+  captureLogStatus.textContent = [
+    `${captureLogView.matchedEvents}/${captureLogView.totalEvents} events`,
+    captureLogView.hiddenNoiseEvents ? `${captureLogView.hiddenNoiseEvents} control events hidden` : '',
+    formatBytes(captureLogView.sizeBytes),
+    errorCount ? `${errorCount} errors` : ''
+  ].filter(Boolean).join(' · ');
+  renderCaptureLogStats();
+  renderCaptureLogEvents();
+}
+
+function renderCaptureLogStats() {
+  captureLogStats.replaceChildren();
+  const items = [
+    ['sessions', (captureLogView.sessions || []).length],
+    ...Object.entries(captureLogView.typeCounts || {})
+  ];
+  for (const [label, value] of items) {
+    const item = document.createElement('span');
+    item.textContent = `${label}: ${value}`;
+    captureLogStats.append(item);
+  }
+}
+
+function renderCaptureLogEvents() {
+  captureLogEvents.replaceChildren();
+  const type = captureLogType.value;
+  const events = (captureLogView?.events || []).filter((event) => !type || event.type === type);
+  if (!events.length) {
+    const empty = document.createElement('li');
+    empty.className = 'capture-log-empty';
+    empty.textContent = t('captureEmpty');
+    captureLogEvents.append(empty);
+    renderCaptureLogDetail(null);
+    return;
+  }
+
+  const selected = events.find((event) => event.id === selectedCaptureEventId) || events.at(-1);
+  selectedCaptureEventId = selected.id;
+  for (const event of [...events].reverse()) {
+    const item = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'capture-log-event';
+    if (event.id === selectedCaptureEventId) button.classList.add('is-selected');
+    const heading = document.createElement('strong');
+    heading.textContent = `#${event.sequence} ${event.type}`;
+    const meta = document.createElement('span');
+    meta.textContent = `${formatEventTime(event.at)} · ${shortId(event.sessionId)}${event.cursor === null ? '' : ` · cursor ${event.cursor}`}`;
+    const preview = document.createElement('small');
+    preview.textContent = event.preview || '';
+    button.append(heading, meta, preview);
+    button.addEventListener('click', () => {
+      selectedCaptureEventId = event.id;
+      renderCaptureLogEvents();
+      renderCaptureLogDetail(event);
+    });
+    item.append(button);
+    captureLogEvents.append(item);
+  }
+
+  renderCaptureLogDetail(selected);
+}
+
+function renderCaptureLogDetail(event) {
+  if (!event) {
+    captureLogDetailTitle.textContent = t('selectEvent');
+    captureLogDetail.textContent = '';
+    return;
+  }
+  captureLogDetailTitle.textContent = `#${event.sequence} ${event.type}`;
+  captureLogDetail.textContent = captureLogDetailMode === 'metadata'
+    ? JSON.stringify(event.metadata, null, 2)
+    : event.content || '';
+}
+
+function setCaptureLogDetailMode(mode) {
+  captureLogDetailMode = mode;
+  captureLogContentTab.classList.toggle('is-active', mode === 'content');
+  captureLogMetadataTab.classList.toggle('is-active', mode === 'metadata');
+  const selected = (captureLogView?.events || []).find(
+    (event) => event.id === selectedCaptureEventId
+  );
+  renderCaptureLogDetail(selected);
+}
+
+function closeCaptureLogPanel() {
+  captureLogPanel.setAttribute('aria-hidden', 'true');
+  if (captureLogRefreshTimer) {
+    clearTimeout(captureLogRefreshTimer);
+    captureLogRefreshTimer = null;
+  }
+}
+
+function scheduleCaptureLogRefresh() {
+  if (captureLogRefreshTimer) clearTimeout(captureLogRefreshTimer);
+  captureLogRefreshTimer = null;
+  if (
+    captureLogPanel.getAttribute('aria-hidden') === 'true' ||
+    !captureLogAutoRefresh.checked
+  ) {
+    return;
+  }
+  captureLogRefreshTimer = setTimeout(async () => {
+    captureLogRefreshTimer = null;
+    await loadCaptureLogView();
+    scheduleCaptureLogRefresh();
+  }, 2000);
+}
+
+function fillSelect(select, options, selectedValue) {
+  select.replaceChildren();
+  for (const option of options) {
+    const element = document.createElement('option');
+    element.value = option.value;
+    element.textContent = option.label;
+    select.append(element);
+  }
+  select.value = options.some((option) => option.value === selectedValue)
+    ? selectedValue
+    : '';
+}
+
+function shortId(value) {
+  const text = String(value || '');
+  return text.length > 12 ? `${text.slice(0, 8)}...` : text;
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatEventTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value || '') : date.toLocaleTimeString();
 }
 
 function renderFeishuConnectStatus(status = { status: 'idle' }) {

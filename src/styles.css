@@ -130,11 +130,14 @@ textarea {
 }
 
 #terminalShell {
+  --terminal-scrollbar-width: 14px;
+  --terminal-scrollbar-gap: 8px;
+  --terminal-right-reserve: 32px;
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 14px;
-  column-gap: 4px;
+  grid-template-columns: minmax(0, 1fr) var(--terminal-scrollbar-width);
+  column-gap: var(--terminal-scrollbar-gap);
   min-height: 0;
   min-width: 0;
   width: 100%;
@@ -144,6 +147,8 @@ textarea {
 }
 
 #terminal {
+  justify-self: start;
+  width: calc(100% - var(--terminal-right-reserve));
   min-height: 0;
   min-width: 0;
   overflow: hidden;
@@ -215,6 +220,303 @@ textarea {
   display: none;
 }
 
+.capture-log-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 11;
+  display: grid;
+  place-items: stretch;
+  background: rgba(5, 8, 12, 0.72);
+}
+
+.capture-log-panel[aria-hidden="true"] {
+  display: none;
+}
+
+.debug-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 9;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(520px, calc(100vw - 32px));
+  max-height: min(680px, calc(100vh - 32px));
+  overflow: hidden;
+  border: 1px solid #3a4656;
+  border-radius: 8px;
+  background: rgba(20, 25, 31, 0.96);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.36);
+}
+
+.debug-panel[aria-hidden="true"] {
+  display: none;
+}
+
+.debug-panel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-bottom: 1px solid #27313d;
+}
+
+.debug-panel h2,
+.debug-block h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.debug-panel p {
+  margin: 3px 0 0;
+  color: #9aa8b8;
+  font-size: 11px;
+}
+
+.debug-panel-body {
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+}
+
+.debug-summary {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 10px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.debug-summary dt {
+  color: #9aa8b8;
+}
+
+.debug-summary dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: #e8edf2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.debug-block {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.debug-block h3 {
+  color: #9aa8b8;
+  font-size: 12px;
+}
+
+.debug-block pre {
+  max-height: 180px;
+  min-width: 0;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid #27313d;
+  border-radius: 6px;
+  background: #111418;
+  color: #d8e0e8;
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.capture-log-dialog {
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  width: min(1440px, 100vw);
+  height: 100%;
+  justify-self: end;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid #27313d;
+  background: #181d23;
+  box-shadow: -24px 0 48px rgba(0, 0, 0, 0.28);
+}
+
+.capture-log-header,
+.capture-log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 16px;
+  border-bottom: 1px solid #27313d;
+}
+
+.capture-log-header {
+  justify-content: space-between;
+}
+
+.capture-log-header h2,
+.capture-log-detail h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.capture-log-header p {
+  max-width: min(760px, 70vw);
+}
+
+.capture-log-header-actions,
+.capture-log-tabs {
+  display: flex;
+  gap: 8px;
+}
+
+.capture-log-toolbar label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #9aa8b8;
+  font-size: 12px;
+}
+
+.capture-log-toolbar select {
+  width: auto;
+  min-width: 170px;
+}
+
+.capture-log-auto-refresh input {
+  width: 16px;
+  height: 16px;
+}
+
+#captureLogStatus {
+  margin-left: auto;
+  color: #9aa8b8;
+  font-size: 12px;
+}
+
+.capture-log-stats {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px 16px;
+  overflow-x: auto;
+  border-bottom: 1px solid #27313d;
+}
+
+.capture-log-stats span {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid #3a4656;
+  border-radius: 4px;
+  color: #9aa8b8;
+  font-size: 11px;
+}
+
+.capture-log-body {
+  display: grid;
+  grid-template-columns: minmax(300px, 34%) minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.capture-log-events {
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  border-right: 1px solid #27313d;
+  list-style: none;
+}
+
+.capture-log-event {
+  display: grid;
+  width: 100%;
+  height: auto;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid #27313d;
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.capture-log-event:hover,
+.capture-log-event.is-selected {
+  background: #222a33;
+}
+
+.capture-log-event strong {
+  color: #e8edf2;
+  font-size: 12px;
+}
+
+.capture-log-event span,
+.capture-log-event small {
+  overflow: hidden;
+  color: #9aa8b8;
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capture-log-empty {
+  padding: 16px;
+  color: #9aa8b8;
+  font-size: 12px;
+}
+
+.capture-log-detail {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.capture-log-detail header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #27313d;
+}
+
+.capture-log-tabs button {
+  height: 28px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+.capture-log-tabs button.is-active {
+  border-color: #60a5fa;
+  background: #27384c;
+}
+
+#captureLogDetail {
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 14px;
+  overflow: auto;
+  color: #d8e0e8;
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .settings-dialog {
   display: grid;
   grid-template-rows: auto 1fr auto;
@@ -266,8 +568,16 @@ textarea {
 .settings-section h3,
 .settings-section label:has(textarea),
 .settings-section .check-row,
+.settings-section .settings-help,
 .connect-box {
   grid-column: 1 / -1;
+}
+
+.settings-help {
+  margin: 0;
+  color: #9aa8b8;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .settings-section label {
@@ -391,5 +701,29 @@ textarea {
 
   .connect-actions {
     flex-wrap: wrap;
+  }
+
+  .capture-log-header,
+  .capture-log-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .capture-log-header-actions {
+    flex-wrap: wrap;
+  }
+
+  #captureLogStatus {
+    margin-left: 0;
+  }
+
+  .capture-log-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(180px, 38%) minmax(0, 1fr);
+  }
+
+  .capture-log-events {
+    border-right: 0;
+    border-bottom: 1px solid #27313d;
   }
 }

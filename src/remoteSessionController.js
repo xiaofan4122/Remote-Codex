@@ -13,6 +13,43 @@ const FINAL_MARKER_PATTERN = /[•●]\s+/;
 const INTRO_LINE_PATTERN = /(?:Use \/skills to list available skills|type \/help|press enter to continue)/i;
 const ACTIVITY_LINE_PATTERN = /^(?:Ran|Explored|Read|Edited|Updated|Added|Removed|Created|Deleted|Opened|Searched|Found|Checked|Applied|Listed|Viewed|Wrote)\b/i;
 const RUNNING_STATUS_PATTERN = /^(?:Working|Thinking|Reading|Writing|Finding|Searching|Running|Checking|Applying|Planning)\b/i;
+const PROGRESS_ITEM_LIMIT = 32;
+const STREAM_FINAL_SETTLE_MS = 1500;
+const STREAM_FINAL_DEBOUNCE_MS = 15000;
+const STREAM_WORKING_HEARTBEAT_MS = 5000;
+const VISUAL_BUSY_STALE_MS = 30 * 60 * 1000;
+const REMOTE_CODEX_COLOR_MARKER_PREFIX = '<!--remote-codex-color:';
+const REMOTE_CODEX_COLOR_MARKER_SUFFIX = '-->';
+const TERMINAL_THEME_PALETTE = {
+  0: [17, 20, 24],
+  1: [255, 107, 107],
+  2: [110, 231, 183],
+  3: [247, 201, 72],
+  4: [96, 165, 250],
+  5: [192, 132, 252],
+  6: [103, 232, 249],
+  7: [232, 237, 242],
+  8: [100, 116, 139],
+  9: [251, 113, 133],
+  10: [134, 239, 172],
+  11: [253, 230, 138],
+  12: [147, 197, 253],
+  13: [216, 180, 254],
+  14: [165, 243, 252],
+  15: [255, 255, 255]
+};
+const TERMINAL_ROLE_COLORS = {
+  approval: 'rgba(247,201,72,1)',
+  command: 'rgba(96,165,250,1)',
+  emphasis: 'rgba(255,255,255,1)',
+  error: 'rgba(255,107,107,1)',
+  info: 'rgba(103,232,249,1)',
+  muted: 'rgba(100,116,139,1)',
+  running: 'rgba(247,201,72,1)',
+  status: 'rgba(247,201,72,1)',
+  success: 'rgba(110,231,183,1)',
+  warning: 'rgba(247,201,72,1)'
+};
 
 class RemoteSessionController {
   constructor({
@@ -77,7 +114,7 @@ class RemoteSessionController {
         await this.stopExecSession(key, message);
         return;
       }
-      await this.stopSession(key, message);
+      await this.interruptSession(key, message);
       return;
     }
 
@@ -159,6 +196,16 @@ class RemoteSessionController {
       return;
     }
 
+    const permissionModeAction = parsePermissionModeCommand(command);
+    if (permissionModeAction) {
+      if (this.shouldUseStructuredRunner(message.pluginId)) {
+        await message.reply('Permission mode controls require visual_terminal mode.');
+        return;
+      }
+      await this.sendControlInput(key, message, permissionModeAction);
+      return;
+    }
+
     if (this.shouldUseStructuredRunner(message.pluginId)) {
       await this.handleExecMessage(key, message, text);
       return;
@@ -180,6 +227,7 @@ class RemoteSessionController {
     state.replyPanel = message.replyPanel;
     state.createReplyStream = message.createReplyStream;
     await this.flushPendingReply(state);
+    this.refreshVisualBusyState(state, 'incoming_message');
     if (isVisualSessionBusy(state)) {
       const approval = this.getApprovalPrompt(state);
       if (approval) {
@@ -190,7 +238,6 @@ class RemoteSessionController {
       return;
     }
 
-    state.replyStream = null;
     state.lastInputText = text;
     state.turnStartedAt = Date.now();
     this.emitRemoteInput(message, text, state);
@@ -439,16 +486,30 @@ class RemoteSessionController {
       outputBuffer: '',
       flushTimer: null,
       streamFinishTimer: null,
+      streamHeartbeatTimer: null,
+      nativePageExitTimer: null,
+      nativePageActionTimer: null,
       pendingReplyTimer: null,
       createReplyStream: message.createReplyStream,
       replyStream: null,
+      replyStreamStarting: false,
       lastReplyText: '',
       lastStreamText: '',
       lastSentReplyText: '',
+      lastReplySignature: '',
+      lastStreamSignature: '',
+      lastSentReplySignature: '',
       pendingReplyText: '',
+      streamedThisTurn: false,
+      streamFinishedForTurn: false,
+      streamClosedText: '',
+      nativePanelUpdateRequested: false,
+      controlActionLocks: new Map(),
       lastApprovalSignature: '',
       lastInputText: '',
       nativeCommand: null,
+      nativePageAction: null,
+      phase: 'idle',
       turnStartedAt: 0,
       stopped: false
     };
@@ -460,6 +521,7 @@ class RemoteSessionController {
 
     state.exitListener = ({ exitCode, signal }) => {
       this.sessions.delete(key);
+      this.clearStreamHeartbeat(state);
       if (state.stopped) return;
       this.safeReply(
         state,
@@ -488,16 +550,27 @@ class RemoteSessionController {
     return state;
   }
 
-  async stopSession(key, message) {
+  async interruptSession(key, message) {
     const state = this.sessions.get(key);
     if (!state) {
       await message.reply('No Codex session is running.');
       return;
     }
 
-    this.disposeState(state, { kill: true });
-    this.sessions.delete(key);
-    await message.reply('Codex session stopped.');
+    const phase = this.refreshSessionPhase(state, 'interrupt_requested');
+    if (phase === 'idle') {
+      await message.reply('Codex 当前没有正在执行的任务。');
+      return;
+    }
+
+    state.session.write('\x1b');
+    this.logger.event?.('remote.session.interrupt.sent', {
+      pluginId: state.pluginId,
+      conversationId: state.conversationId,
+      sessionId: state.session?.id || '',
+      phase
+    });
+    await message.reply('已请求中断当前任务，Codex 会话仍保持运行。');
   }
 
   async sendStatus(key, message) {
@@ -534,6 +607,7 @@ class RemoteSessionController {
 
   buildVisualStatusPayload(key, message, state, options = {}) {
     const sessionStatus = state?.session?.status?.() || null;
+    const phase = state ? this.refreshSessionPhase(state, 'status_requested') : 'detached';
     const outputConfig = this.getOutputConfig(message.pluginId);
     const responseSource =
       this.getPluginConfig(message.pluginId).responseSource ||
@@ -547,6 +621,7 @@ class RemoteSessionController {
       notice: options.notice || '',
       attached: Boolean(state),
       running: Boolean(sessionStatus && !sessionStatus.exited),
+      phase,
       busy: Boolean(state?.turnStartedAt && !state?.lastReplyText),
       shared: Boolean(state?.shared),
       session: sessionStatus,
@@ -576,6 +651,7 @@ class RemoteSessionController {
       notice: options.notice || '',
       attached: Boolean(state),
       running: Boolean(state),
+      phase: state?.running ? 'working' : state ? 'idle' : 'detached',
       busy: Boolean(state?.running),
       shared: false,
       session: state
@@ -607,6 +683,7 @@ class RemoteSessionController {
 
   async handleNativeSlashCommand(key, message, text) {
     const commandText = normalizeNativeCodexSlashText(text);
+    const command = commandText.split(/\s+/)[0].toLowerCase();
     let state = this.sessions.get(key);
     if (!state) {
       if (!this.config.remoteControl.autoCreateSession) {
@@ -622,7 +699,23 @@ class RemoteSessionController {
     state.reply = message.reply;
     state.replyPanel = message.replyPanel;
     state.createReplyStream = message.createReplyStream;
-    await this.flushPendingReply(state);
+    this.discardPendingReply(state, 'native_slash_command');
+    this.logger.event?.('remote.native_slash.start', {
+      pluginId: message.pluginId,
+      conversationId: message.conversationId,
+      sessionId: state.session?.id || '',
+      command,
+      hasReplyPanel: typeof message.replyPanel === 'function',
+      hasReplyStreamFactory: typeof message.createReplyStream === 'function',
+      hadReplyStream: Boolean(state.replyStream),
+      hadLastReply: Boolean(state.lastReplyText),
+      outputBufferChars: String(state.outputBuffer || '').length
+    });
+    this.refreshSessionPhase(state, 'native_slash_requested');
+    if (this.refreshOpenNativeSlashPage(state, command, message)) {
+      return;
+    }
+    this.refreshVisualBusyState(state, 'native_slash_command');
     if (isVisualSessionBusy(state)) {
       const approval = this.getApprovalPrompt(state);
       if (approval) {
@@ -636,14 +729,15 @@ class RemoteSessionController {
     state.lastInputText = commandText;
     state.turnStartedAt = Date.now();
     state.nativeCommand = {
-      command: commandText.split(/\s+/)[0].toLowerCase(),
+      command,
       text: commandText,
       startedAt: Date.now()
     };
+    this.refreshSessionPhase(state, 'native_slash_started');
     this.emitRemoteInput(message, commandText, state);
     this.resetPendingOutput(state);
     state.nativeCommand = {
-      command: commandText.split(/\s+/)[0].toLowerCase(),
+      command,
       text: commandText,
       startedAt: Date.now()
     };
@@ -677,8 +771,31 @@ class RemoteSessionController {
     state.reply = message.reply;
     state.replyPanel = message.replyPanel;
     state.createReplyStream = message.createReplyStream;
+    const pageContext = message.pageContext
+      ? normalizeNativeCodexCommand(message.pageContext)
+      : '';
+    const nativeCommand = state.nativeCommand?.command
+      ? normalizeNativeCodexCommand(state.nativeCommand.command)
+      : '';
+    if (
+      message.pageContext &&
+      pageContext !== nativeCommand
+    ) {
+      this.logger.event?.('remote.control.rejected_stale_page', {
+        pluginId: message.pluginId,
+        conversationId: message.conversationId,
+        action,
+        pageContext,
+        nativeCommand
+      });
+      await message.reply('当前页面已经变化，请使用最新卡片继续操作。');
+      return;
+    }
 
-    const approvalAction = isApprovalControlAction(action);
+    const phase = this.refreshSessionPhase(state, 'control_received');
+    const approvalAction =
+      phase === 'awaiting_authorization' &&
+      isApprovalControlAction(action);
     const approval = approvalAction ? this.getApprovalPrompt(state) : null;
     if (requiresApprovalPrompt(action) && !approval) {
       await this.sendPermissionPanel(key, message, state, null, {
@@ -686,14 +803,34 @@ class RemoteSessionController {
       });
       return;
     }
+    if (this.isBufferedControlAction(state, action, approval)) {
+      await message.reply('操作已收到，正在处理，请勿重复点击。');
+      return;
+    }
 
-    const input = buildControlInput(action);
+    const input = buildNativeControlInput(state, action);
     if (!input) {
       await message.reply(`Unknown control action: ${action}`);
       return;
     }
 
-    state.session.write(input);
+    await writeNativeControlInput(state, action, input);
+    if (
+      state.nativeCommand &&
+      ['up', 'down', 'left', 'right', 'tab'].includes(String(action || '').toLowerCase())
+    ) {
+      state.nativePanelUpdateRequested = true;
+    }
+    if (
+      state.nativeCommand &&
+      (
+        ['enter', 'escape'].includes(String(action || '').toLowerCase()) ||
+        isPermissionModeControlAction(action)
+      )
+    ) {
+      this.beginNativePageAction(state, action);
+    }
+    this.refreshSessionPhase(state, 'control_sent');
     if (approvalAction) {
       state.outputBuffer = '';
     }
@@ -725,8 +862,16 @@ class RemoteSessionController {
     state.flushTimer = setTimeout(() => {
       state.flushTimer = null;
       const output = state.outputBuffer;
+      if (this.confirmNativePageActionIfReady(state, 'output')) {
+        return;
+      }
+      if (state.nativePageAction) {
+        state.outputBuffer = '';
+        return;
+      }
       const approval = this.getApprovalPrompt(state, output);
       if (approval && !state.replyStream) {
+        this.refreshSessionPhase(state, 'approval_detected');
         const signature = approvalPromptSignature(approval);
         if (signature && signature !== state.lastApprovalSignature) {
           state.lastApprovalSignature = signature;
@@ -741,20 +886,49 @@ class RemoteSessionController {
         state.outputBuffer = '';
         return;
       }
-      const formatted = this.formatStateOutput(state, output);
+      const canExtractFinal =
+        !state.replyStream ||
+        outputConfig.outputMode !== 'final' ||
+        state.nativeCommand ||
+        isVisualTurnSettled(state);
+      const formatted = canExtractFinal ? this.formatStateOutput(state, output) : '';
+      this.refreshSessionPhase(state, 'output_received');
       const streamText =
         state.replyStream && outputConfig.outputMode === 'final'
           ? this.formatStreamingStateOutput(state, output, formatted)
           : formatted;
       this.captureCleaningSample(state, output, formatted, streamText);
-      if (!formatted || formatted === state.lastReplyText) {
+      if (state.nativeCommand && formatted) {
+        this.logger.event?.('remote.native_slash.output', {
+          pluginId: state.pluginId,
+          conversationId: state.conversationId,
+          sessionId: state.session?.id || '',
+          command: state.nativeCommand.command,
+          rawChars: String(output || '').length,
+          formattedChars: String(formatted || '').length,
+          streamChars: String(streamText || '').length,
+          hasReplyStream: Boolean(state.replyStream),
+          snapshotLines: collectNativeVisualLines(
+            state.session?.visualViewportSnapshot || state.session?.visualSnapshot
+          ).length,
+          text: clipForLog(formatted)
+        });
+      }
+      const formattedSignature = remoteMessageSignature(formatted);
+      const streamSignature = remoteMessageSignature(streamText);
+      if (!formatted || formattedSignature === state.lastReplySignature) {
         if (
           state.replyStream &&
           streamText &&
-          streamText !== state.lastStreamText
+          streamSignature !== state.lastStreamSignature
         ) {
           state.lastStreamText = streamText;
-          this.updateReplyStream(state, streamText, { final: Boolean(formatted) });
+          this.updateReplyStream(state, streamText, {
+            final: shouldFinishReplyStream(state, formatted),
+            keepOpen: isPersistentNativeSlashPage(state.nativeCommand?.command),
+            finishDelayMs: this.getStreamFinishDelayMs(state, outputConfig)
+          });
+          state.nativePanelUpdateRequested = false;
         }
         if (!formatted && !streamText && outputConfig.outputMode === 'final') {
           this.logger.event?.('remote.reply.ignored', {
@@ -767,15 +941,75 @@ class RemoteSessionController {
         return;
       }
       state.lastReplyText = formatted;
+      state.lastReplySignature = formattedSignature;
       if (outputConfig.outputMode !== 'final') {
         state.outputBuffer = '';
       }
       if (state.replyStream) {
         state.lastStreamText = streamText;
-        this.updateReplyStream(state, streamText, { final: Boolean(formatted) });
+        this.updateReplyStream(state, streamText, {
+          final: shouldFinishReplyStream(state, formatted),
+          keepOpen: isPersistentNativeSlashPage(state.nativeCommand?.command),
+          finishDelayMs: this.getStreamFinishDelayMs(state, outputConfig)
+        });
+        state.nativePanelUpdateRequested = false;
+        return;
+      }
+      if (state.nativeCommand) {
+        if (state.replyStreamStarting) {
+          this.logger.event?.('remote.native_slash.panel.ignored', {
+            pluginId: state.pluginId,
+            conversationId: state.conversationId,
+            sessionId: state.session.id,
+            command: state.nativeCommand.command,
+            reason: 'stream_starting',
+            raw: clipForLog(output)
+          });
+          return;
+        }
+        if (
+          normalizeNativeCodexCommand(state.nativeCommand.command) === '/status' &&
+          !isCompleteStatusSlashOutput(formatted)
+        ) {
+          this.logger.event?.('remote.native_slash.panel.ignored', {
+            pluginId: state.pluginId,
+            conversationId: state.conversationId,
+            sessionId: state.session.id,
+            command: state.nativeCommand.command,
+            reason: 'incomplete_status',
+            raw: clipForLog(output)
+          });
+          return;
+        }
+        if (state.streamedThisTurn && !state.nativePanelUpdateRequested) {
+          this.logger.event?.('remote.native_slash.panel.ignored', {
+            pluginId: state.pluginId,
+            conversationId: state.conversationId,
+            sessionId: state.session.id,
+            command: state.nativeCommand.command,
+            reason: 'stream_already_sent',
+            raw: clipForLog(output)
+          });
+          return;
+        }
+        state.nativePanelUpdateRequested = false;
+        const panel = this.buildNativeSlashPanelPayload(state, formatted);
+        this.safeReplyPanel(state, panel, formatted).then(() => {
+          state.turnStartedAt = 0;
+        });
         return;
       }
       if (outputConfig.outputMode === 'final') {
+        if (state.streamedThisTurn) {
+          this.logger.event?.('remote.reply.ignored', {
+            pluginId: state.pluginId,
+            conversationId: state.conversationId,
+            sessionId: state.session.id,
+            reason: 'stream_already_sent',
+            raw: clipForLog(output)
+          });
+          return;
+        }
         this.scheduleFinalReply(state, formatted, outputConfig.finalReplyDebounceMs);
         return;
       }
@@ -817,27 +1051,174 @@ class RemoteSessionController {
     state.turnStartedAt = 0;
   }
 
-  async startReplyStream(state, message) {
-    if (typeof state.createReplyStream !== 'function') return;
-    const initialText = this.formatRunningFallback(state);
-    state.replyStream = await state.createReplyStream({
-      message,
-      title: state.nativeCommand
-        ? `Remote Codex ${state.nativeCommand.command}`
-        : 'Remote Codex',
-      initialText,
-      controlMode: state.nativeCommand ? 'navigation' : 'default'
-    });
-    if (state.replyStream) {
-      state.lastStreamText = initialText;
+  discardPendingReply(state, reason = 'discard') {
+    if (!state) return;
+    const finalText = String(state.pendingReplyText || '').trim();
+    if (state.pendingReplyTimer) {
+      clearTimeout(state.pendingReplyTimer);
+      state.pendingReplyTimer = null;
+    }
+    state.pendingReplyText = '';
+    if (finalText) {
+      this.logger.event?.('remote.pending_reply.discarded', {
+        pluginId: state.pluginId,
+        conversationId: state.conversationId,
+        sessionId: state.session?.id || '',
+        reason,
+        text: clipForLog(finalText)
+      });
     }
   }
 
+  async startReplyStream(state, message) {
+    if (typeof state.createReplyStream !== 'function') {
+      this.logger.event?.('remote.stream.start.skipped', {
+        pluginId: state.pluginId,
+        conversationId: state.conversationId,
+        sessionId: state.session?.id || '',
+        reason: 'missing_createReplyStream',
+        controlMode: this.getReplyStreamControlMode(state)
+      });
+      return;
+    }
+    const initialText = this.formatRunningFallback(state);
+    state.replyStreamStarting = true;
+    try {
+      state.replyStream = await state.createReplyStream({
+        message,
+        title: state.nativeCommand
+          ? `Remote Codex ${state.nativeCommand.command}`
+          : 'Remote Codex',
+        initialText,
+        controlMode: this.getReplyStreamControlMode(state)
+      });
+    } finally {
+      state.replyStreamStarting = false;
+    }
+    if (state.replyStream) {
+      this.logger.event?.('remote.stream.started', {
+        pluginId: state.pluginId,
+        conversationId: state.conversationId,
+        sessionId: state.session?.id || '',
+        controlMode: this.getReplyStreamControlMode(state)
+      });
+      state.lastStreamText = initialText;
+      state.streamedThisTurn = true;
+      state.streamFinishedForTurn = false;
+      state.streamClosedText = '';
+      this.scheduleStreamHeartbeat(state);
+    } else {
+      this.logger.event?.('remote.stream.start.skipped', {
+        pluginId: state.pluginId,
+        conversationId: state.conversationId,
+        sessionId: state.session?.id || '',
+        reason: 'factory_returned_null',
+        controlMode: this.getReplyStreamControlMode(state)
+      });
+    }
+  }
+
+  getReplyStreamControlMode(state) {
+    if (!state?.nativeCommand) return 'default';
+    const command = normalizeNativeCodexCommand(state.nativeCommand.command);
+    if (command === '/resume') return 'resume';
+    if (command === '/permissions') return 'permissions';
+    if (command === '/status') return 'status';
+    return 'slash';
+  }
+
+  refreshOpenNativeSlashPage(state, command, message) {
+    const normalized = normalizeNativeCodexCommand(command);
+    if (!isPersistentNativeSlashPage(normalized)) return false;
+    if (normalizeNativeCodexCommand(state?.nativeCommand?.command) !== normalized) {
+      return false;
+    }
+    if (!isNativeSlashPageVisible(
+      state.session?.visualViewportSnapshot || state.session?.visualSnapshot,
+      normalized
+    )) {
+      return false;
+    }
+
+    const formatted = this.formatStateOutput(state, state.outputBuffer || '');
+    if (!formatted) return true;
+    state.lastInputText = normalized;
+    state.turnStartedAt = Date.now();
+    state.nativePanelUpdateRequested = false;
+    if (state.replyStream) {
+      state.lastStreamText = formatted;
+      this.updateReplyStream(state, formatted, {
+        keepOpen: true,
+        immediate: true
+      });
+    }
+    this.logger.event?.('remote.native_slash.reused', {
+      pluginId: state.pluginId,
+      conversationId: state.conversationId,
+      sessionId: state.session?.id || '',
+      command: normalized
+    });
+    return true;
+  }
+
+  isBufferedControlAction(state, action, approval = null) {
+    if (!state) return false;
+    const now = Date.now();
+    const locks = state.controlActionLocks || new Map();
+    state.controlActionLocks = locks;
+
+    for (const [key, lockedAt] of locks) {
+      if (now - lockedAt > 10000) {
+        locks.delete(key);
+      }
+    }
+
+    const value = String(action || '').toLowerCase();
+    const submit = isSubmitControlAction(value) && !state.nativeCommand;
+    const signature = approval
+      ? approvalPromptSignature(approval)
+      : state.nativeCommand?.command || state.lastInputText || '';
+    const key = `${submit ? 'submit' : value}:${signature}`;
+    const ttlMs = submit ? 10000 : 700;
+    const lockedAt = locks.get(key);
+    if (lockedAt && now - lockedAt <= ttlMs) {
+      return true;
+    }
+
+    locks.set(key, now);
+    return false;
+  }
+
   updateReplyStream(state, text, options = {}) {
+    const signature = remoteMessageSignature(text);
+    if (
+      signature &&
+      signature === state.lastStreamSignature &&
+      !(options.final && signature !== state.lastSentReplySignature)
+    ) {
+      return;
+    }
+    state.streamedThisTurn = true;
+    state.streamFinishedForTurn = false;
+    if (signature) {
+      state.lastStreamSignature = signature;
+    }
+    if (options.final || options.keepOpen) {
+      this.clearStreamHeartbeat(state);
+    }
+    const updateMethod =
+      options.immediate && typeof state.replyStream?.replace === 'function'
+        ? 'replace'
+        : 'update';
     state.replyStream
-      ?.update(text)
+      ?.[updateMethod](text)
       .catch((error) => {
         this.logger.warn?.('Remote reply stream update failed:', error.message);
+        if (options.final && text && text !== state.lastSentReplyText) {
+          this.safeReply(state, text).then(() => {
+            state.turnStartedAt = 0;
+          });
+        }
       });
 
     if (state.streamFinishTimer) {
@@ -845,22 +1226,109 @@ class RemoteSessionController {
       state.streamFinishTimer = null;
     }
 
-    if (!options.final) return;
+    if (!options.final) {
+      if (!options.keepOpen) {
+        this.scheduleStreamHeartbeat(state);
+      }
+      return;
+    }
 
+    const finishDelayMs = Number.isFinite(Number(options.finishDelayMs))
+      ? Math.max(0, Number(options.finishDelayMs))
+      : STREAM_FINAL_DEBOUNCE_MS;
+    const stream = state.replyStream;
     state.streamFinishTimer = setTimeout(() => {
       state.streamFinishTimer = null;
-      state.replyStream
+      stream
         ?.finish(text)
         .then(() => {
-          state.replyStream = null;
+          if (state.replyStream === stream) {
+            state.replyStream = null;
+          }
+          state.streamFinishedForTurn = true;
+          state.streamClosedText = text;
+          state.lastSentReplyText = text;
+          state.lastSentReplySignature = signature;
+          state.turnStartedAt = 0;
         })
         .catch((error) => {
           this.logger.warn?.('Remote reply stream finish failed:', error.message);
+          if (
+            error?.finalUpdateFailed &&
+            text &&
+            text !== state.lastSentReplyText
+          ) {
+            this.safeReply(state, text).then(() => {
+              state.streamFinishedForTurn = true;
+              state.streamClosedText = text;
+              state.lastSentReplySignature = signature;
+              state.turnStartedAt = 0;
+            });
+          }
+        })
+        .finally(() => {
+          if (state.replyStream === stream) {
+            state.replyStream = null;
+          }
         });
-    }, 6000);
+    }, finishDelayMs);
+  }
+
+  scheduleStreamHeartbeat(state) {
+    this.clearStreamHeartbeat(state);
+    if (!state?.replyStream || !state.turnStartedAt || state.streamFinishedForTurn) {
+      return;
+    }
+
+    state.streamHeartbeatTimer = setTimeout(() => {
+      state.streamHeartbeatTimer = null;
+      this.sendWorkingHeartbeat(state);
+    }, STREAM_WORKING_HEARTBEAT_MS);
+  }
+
+  clearStreamHeartbeat(state) {
+    if (state?.streamHeartbeatTimer) {
+      clearTimeout(state.streamHeartbeatTimer);
+      state.streamHeartbeatTimer = null;
+    }
+  }
+
+  sendWorkingHeartbeat(state) {
+    if (!state?.replyStream || !state.turnStartedAt || state.streamFinishedForTurn) {
+      return;
+    }
+    if (state.streamFinishTimer) return;
+
+    const streamText = this.formatWorkingHeartbeatText(state);
+    if (streamText && streamText !== state.lastStreamText) {
+      state.lastStreamText = streamText;
+      this.updateReplyStream(state, streamText, { heartbeat: true });
+      return;
+    }
+
+    this.scheduleStreamHeartbeat(state);
+  }
+
+  getStreamFinishDelayMs(state, outputConfig = {}) {
+    if (
+      normalizeNativeCodexCommand(state?.nativeCommand?.command) === '/status' &&
+      isCompleteStatusSlashOutput(state.lastReplyText)
+    ) {
+      return STREAM_FINAL_SETTLE_MS;
+    }
+    if (isVisualTurnSettled(state)) {
+      return STREAM_FINAL_SETTLE_MS;
+    }
+    const configured = Number(outputConfig.finalReplyDebounceMs);
+    return Math.max(
+      STREAM_FINAL_DEBOUNCE_MS,
+      Number.isFinite(configured) ? configured : 0
+    );
   }
 
   async safeReply(state, text) {
+    const signature = remoteMessageSignature(text);
+    if (signature && signature === state.lastSentReplySignature) return;
     try {
       if (text.trim()) {
         this.logger.event?.('remote.reply.sent', {
@@ -871,6 +1339,7 @@ class RemoteSessionController {
         });
         await state.reply(text);
         state.lastSentReplyText = text;
+        state.lastSentReplySignature = signature;
       }
     } catch (error) {
       this.logger.warn?.('Remote reply failed:', error.message);
@@ -892,6 +1361,10 @@ class RemoteSessionController {
           ...panel,
           fallbackText: text
         });
+        if (text) {
+          state.lastSentReplyText = text;
+          state.lastSentReplySignature = remoteMessageSignature(text);
+        }
         return;
       }
 
@@ -925,7 +1398,8 @@ class RemoteSessionController {
         snapshot: state.session.visualViewportSnapshot || state.session.visualSnapshot,
         raw: data,
         command: state.nativeCommand.command,
-        inputText: state.lastInputText
+        inputText: state.lastInputText,
+        colorMarkers: state.pluginId === 'feishu'
       });
       if (rendered) return rendered;
     }
@@ -953,15 +1427,47 @@ class RemoteSessionController {
           snapshot: state.session.visualViewportSnapshot || state.session.visualSnapshot,
           raw: data,
           command: state.nativeCommand.command,
-          inputText: state.lastInputText
+          inputText: state.lastInputText,
+          colorMarkers: state.pluginId === 'feishu'
         }) || this.formatRunningFallback(state)
       );
     }
 
     const activity = state.shared
-      ? formatVisualProgressSnapshot(state.session.visualSnapshot, state.lastInputText, {
-          finalText
-        })
+      ? (
+          formatClassifiedVisualTurnStream(
+            state.session.visualStyledSnapshot,
+            state.lastInputText,
+            {
+              colorMarkers: state.pluginId === 'feishu',
+              finalText
+            }
+          ) ||
+          formatClassifiedVisualTurnStream(
+            state.session.visualSnapshot,
+            state.lastInputText,
+            {
+              colorMarkers: state.pluginId === 'feishu',
+              finalText
+            }
+          ) ||
+          formatVisualProgressSnapshot(
+            state.session.visualStyledSnapshot,
+            state.lastInputText,
+            {
+              colorMarkers: state.pluginId === 'feishu',
+              finalText
+            }
+          ) ||
+          formatVisualProgressSnapshot(state.session.visualSnapshot, state.lastInputText, {
+            colorMarkers: state.pluginId === 'feishu',
+            finalText
+          }) ||
+          formatTerminalProgress(data, {
+            colorMarkers: state.pluginId === 'feishu',
+            finalText
+          })
+        )
       : formatTerminalProgress(data, { finalText });
     if (finalText) {
       return activity ? `${activity}\n\n**回复**\n${finalText}` : `**回复**\n${finalText}`;
@@ -970,9 +1476,50 @@ class RemoteSessionController {
   }
 
   formatRunningFallback(state) {
+    const nativeCommand = state?.nativeCommand?.command
+      ? normalizeNativeCodexCommand(state.nativeCommand.command)
+      : '';
+    if (nativeCommand === '/permissions') {
+      return formatPermissionsLoadingText();
+    }
+    if (nativeCommand === '/resume') {
+      return '**/resume 会话列表**\n- 正在加载历史会话，请稍候。';
+    }
+    const line = withRemoteCodexLineColorMarker(
+      this.formatWorkingStatusLine(state),
+      TERMINAL_ROLE_COLORS.running,
+      { colorMarkers: state.pluginId === 'feishu' }
+    );
+    return `**进度**\n${line}`;
+  }
+
+  formatWorkingHeartbeatText(state) {
+    const current = String(state.lastStreamText || '').trim();
+    const workingLine = this.formatWorkingStatusLine(state);
+    if (!current || /\n\n\*\*回复\*\*/.test(current)) {
+      return this.formatRunningFallback(state);
+    }
+
+    if (!/^\*\*进度\*\*/.test(current)) {
+      return `${this.formatRunningFallback(state)}\n\n${current}`;
+    }
+
+    const lines = current.split('\n');
+    const rest = lines
+      .slice(1)
+      .filter((line) => !isWorkingStatusLine(line));
+    const coloredWorkingLine = withRemoteCodexLineColorMarker(
+      workingLine,
+      TERMINAL_ROLE_COLORS.running,
+      { colorMarkers: state.pluginId === 'feishu' }
+    );
+    return ['**进度**', coloredWorkingLine, ...rest].join('\n').trim();
+  }
+
+  formatWorkingStatusLine(state) {
     const startedAt = Number(state.turnStartedAt) || Date.now();
     const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-    return `**进度**\n- Codex 正在处理 (${elapsedSeconds}s)`;
+    return `- Working (${elapsedSeconds}s)`;
   }
 
   captureCleaningSample(state, raw, formatted, streamText) {
@@ -995,6 +1542,10 @@ class RemoteSessionController {
         visualSnapshot: clipForLog(state.session?.visualSnapshot || '', 20000),
         visualViewportSnapshot: clipForLog(
           state.session?.visualViewportSnapshot || '',
+          12000
+        ),
+        visualStyledSnapshot: clipForLog(
+          JSON.stringify(state.session?.visualStyledSnapshot || null),
           12000
         ),
         formatted: clipForLog(formatted, 12000),
@@ -1074,9 +1625,258 @@ class RemoteSessionController {
         : options.notice || '当前没有检测到权限确认弹窗。',
       progressText: active ? formatApprovalPrompt(approval) : '',
       actions: active
-        ? ['approve', 'approve_persistent', 'deny', 'up', 'down', 'enter']
+        ? this.buildPermissionPanelActions(approval)
         : ['tail', 'status']
     };
+  }
+
+  buildPermissionPanelActions(approval) {
+    const actions = ['approve', 'approve_persistent', 'deny'];
+    if (approval?.options?.length > 0) {
+      actions.push('up', 'down', 'enter');
+    }
+    return actions;
+  }
+
+  buildNativeSlashPanelPayload(state, content) {
+    const command = normalizeNativeCodexCommand(state?.nativeCommand?.command);
+    return {
+      kind: 'native_slash',
+      title: `Remote Codex ${command}`,
+      command,
+      attached: Boolean(state),
+      active: true,
+      content: String(content || '').trim(),
+      message: String(content || '').trim() || 'Codex 没有返回可解析的页面内容。',
+      session: state?.session?.status?.() || null,
+      actions: buildNativeSlashPanelActions(command),
+      fallbackText: String(content || '').trim()
+    };
+  }
+
+  refreshSessionPhase(state, reason = 'refresh') {
+    if (!state) return 'detached';
+    const next = detectRemoteSessionPhase(state, this.getApprovalPrompt(state));
+    if (state.phase !== next) {
+      this.logger.event?.('remote.session.phase.changed', {
+        pluginId: state.pluginId,
+        conversationId: state.conversationId,
+        sessionId: state.session?.id || '',
+        from: state.phase || '',
+        to: next,
+        reason,
+        nativeCommand: state.nativeCommand?.command || ''
+      });
+      state.phase = next;
+    }
+    return next;
+  }
+
+  refreshVisualBusyState(state, reason = 'refresh') {
+    if (!state?.turnStartedAt || state.lastReplyText || state.pendingReplyText) {
+      return false;
+    }
+    if (state.session?.status?.().exited) return false;
+    if (!isVisualTurnSettled(state) && !isStaleVisualBusyState(state)) {
+      return false;
+    }
+
+    this.logger.event?.('remote.session.busy_state.cleared', {
+      pluginId: state.pluginId,
+      conversationId: state.conversationId,
+      sessionId: state.session?.id || '',
+      reason,
+      elapsedMs: Math.max(0, Date.now() - Number(state.turnStartedAt || 0)),
+      lastInputText: clipForLog(state.lastInputText || '', 300)
+    });
+    state.turnStartedAt = 0;
+    state.outputBuffer = '';
+    this.clearStreamHeartbeat(state);
+    this.refreshSessionPhase(state, 'busy_state_cleared');
+    return true;
+  }
+
+  buildDebugState(session = null) {
+    const state = session
+      ? [...this.sessions.values()].find((candidate) => candidate.session?.id === session.id)
+      : null;
+    const targetSession = session || state?.session || null;
+    const approval = state
+      ? this.getApprovalPrompt(state)
+      : extractApprovalPrompt(collectNativeVisualLines(
+          targetSession?.visualViewportSnapshot || targetSession?.visualSnapshot || ''
+        ));
+    const phase = state
+      ? this.refreshSessionPhase(state, 'debug_state')
+      : detectVisualSessionPhase(targetSession, approval);
+    const visualSnapshot = String(targetSession?.visualSnapshot || '');
+    const visualViewportSnapshot = String(targetSession?.visualViewportSnapshot || '');
+    const visualLines = collectNativeVisualLines(
+      visualViewportSnapshot || visualSnapshot
+    );
+
+    return {
+      at: new Date().toISOString(),
+      phase,
+      busy: state ? isVisualSessionBusy(state) : phase === 'working',
+      hasRemoteState: Boolean(state),
+      remote: state
+        ? {
+            key: state.key || '',
+            pluginId: state.pluginId || '',
+            conversationId: state.conversationId || '',
+            shared: Boolean(state.shared),
+            nativeCommand: state.nativeCommand?.command || '',
+            turnStartedAt: state.turnStartedAt || 0,
+            lastInputText: clipForLog(state.lastInputText || '', 500),
+            lastReplyText: clipForLog(state.lastReplyText || '', 500),
+            pendingReplyText: clipForLog(state.pendingReplyText || '', 500),
+            outputBufferChars: String(state.outputBuffer || '').length,
+            streamedThisTurn: Boolean(state.streamedThisTurn),
+            streamFinishedForTurn: Boolean(state.streamFinishedForTurn)
+          }
+        : null,
+      session: targetSession?.status?.() || null,
+      detection: {
+        visibleIdlePrompt: hasVisibleIdlePrompt(visualViewportSnapshot || visualSnapshot),
+        activeVisualIndicators: hasActiveVisualIndicators(visualViewportSnapshot || visualSnapshot),
+        visualTurnSettled: state ? isVisualTurnSettled(state) : false,
+        approval: approval
+          ? {
+              status: approval.status || '',
+              question: approval.question || '',
+              options: approval.options || []
+            }
+          : null,
+        visualLineCount: visualLines.length,
+        visualSnapshotChars: visualSnapshot.length,
+        visualViewportSnapshotChars: visualViewportSnapshot.length
+      },
+      text: {
+        viewportTail: clipForLog(visualLines.slice(-14).join('\n'), 3000),
+        lastOutputTail: clipForLog(readSessionOutputTail(targetSession), 3000)
+      }
+    };
+  }
+
+  beginNativePageAction(state, action) {
+    if (!state?.nativeCommand) return;
+    if (state.nativePageActionTimer) {
+      clearTimeout(state.nativePageActionTimer);
+      state.nativePageActionTimer = null;
+    }
+    const command = state.nativeCommand.command;
+    state.nativePageAction = {
+      action: String(action || '').toLowerCase(),
+      command,
+      requestedAt: Date.now(),
+      checks: 0,
+      beforeSignature: nativePageSnapshotSignature(state, command)
+    };
+    this.scheduleNativePageActionCheck(state, 80);
+  }
+
+  scheduleNativePageActionCheck(state, delayMs = 400) {
+    if (!state?.nativePageAction) return;
+    if (state.nativePageActionTimer) {
+      clearTimeout(state.nativePageActionTimer);
+    }
+    state.nativePageActionTimer = setTimeout(() => {
+      state.nativePageActionTimer = null;
+      this.confirmNativePageActionIfReady(state, 'timer');
+    }, Math.max(0, Number(delayMs) || 0));
+    state.nativePageActionTimer.unref?.();
+  }
+
+  confirmNativePageActionIfReady(state, reason = 'check') {
+    const pending = state?.nativePageAction;
+    if (!pending || !state.nativeCommand) return false;
+    if (state.nativeCommand.command !== pending.command) {
+      state.nativePageAction = null;
+      return false;
+    }
+
+    if (!isNativePageActionConfirmed(state, pending)) {
+      pending.checks = (pending.checks || 0) + 1;
+      if (Date.now() - pending.requestedAt < 12000) {
+        this.scheduleNativePageActionCheck(
+          state,
+          pending.checks < 6 ? 160 : 800
+        );
+      }
+      return false;
+    }
+
+    if (state.nativePageActionTimer) {
+      clearTimeout(state.nativePageActionTimer);
+      state.nativePageActionTimer = null;
+    }
+    const text = formatNativePageActionResult(pending, state);
+    const hadStream = Boolean(state.replyStream);
+    this.finishNativePageStream(state, text);
+    if (typeof state.replyPanel === 'function') {
+      const panel = {
+        kind: 'native_slash',
+        title: `Remote Codex ${normalizeNativeCodexCommand(pending.command)}`,
+        command: normalizeNativeCodexCommand(pending.command),
+        active: false,
+        content: text,
+        message: text,
+        session: state.session?.status?.() || null,
+        actions: [],
+        fallbackText: text
+      };
+      this.safeReplyPanel(state, panel, text);
+    }
+    this.logger.event?.('remote.native_slash.action.confirmed', {
+      pluginId: state.pluginId,
+      conversationId: state.conversationId,
+      sessionId: state.session?.id || '',
+      command: pending.command,
+      action: pending.action,
+      reason
+    });
+    state.nativePageAction = null;
+    state.nativeCommand = null;
+    state.turnStartedAt = 0;
+    state.outputBuffer = '';
+    this.refreshSessionPhase(state, `native_page_${pending.action}_confirmed`);
+    return true;
+  }
+
+  finishNativePageStream(state, finalText = '') {
+    const stream = state?.replyStream;
+    if (!stream) return;
+
+    const text = String(
+      finalText ||
+      state.lastStreamText ||
+      state.lastReplyText ||
+      this.formatRunningFallback(state)
+    ).trim();
+    this.clearStreamHeartbeat(state);
+    if (state.streamFinishTimer) {
+      clearTimeout(state.streamFinishTimer);
+      state.streamFinishTimer = null;
+    }
+    state.replyStream = null;
+    state.replyStreamStarting = false;
+    state.streamFinishedForTurn = true;
+    state.streamClosedText = text;
+    state.lastSentReplyText = text;
+    const updateFinal = finalText && typeof stream.replace === 'function'
+      ? stream.replace(text)
+      : finalText
+        ? stream.update?.(text)
+        : null;
+    Promise.resolve(updateFinal)
+      .catch((error) => {
+        this.logger.warn?.('Remote native page stream final update failed:', error.message);
+      })
+      .then(() => stream.finish(text))
+      .catch((error) => {
+        this.logger.warn?.('Remote native page stream finish failed:', error.message);
+      });
   }
 
   acquireSession(message, cwd, options = {}) {
@@ -1121,6 +1921,15 @@ class RemoteSessionController {
       clearTimeout(state.streamFinishTimer);
       state.streamFinishTimer = null;
     }
+    if (state.nativePageExitTimer) {
+      clearTimeout(state.nativePageExitTimer);
+      state.nativePageExitTimer = null;
+    }
+    if (state.nativePageActionTimer) {
+      clearTimeout(state.nativePageActionTimer);
+      state.nativePageActionTimer = null;
+    }
+    this.clearStreamHeartbeat(state);
     if (state.pendingReplyTimer) {
       clearTimeout(state.pendingReplyTimer);
       state.pendingReplyTimer = null;
@@ -1134,9 +1943,19 @@ class RemoteSessionController {
     state.lastReplyText = '';
     state.lastStreamText = '';
     state.lastSentReplyText = '';
+    state.lastReplySignature = '';
+    state.lastStreamSignature = '';
+    state.lastSentReplySignature = '';
     state.pendingReplyText = '';
+    state.controlActionLocks = new Map();
+    state.streamedThisTurn = false;
+    state.streamFinishedForTurn = false;
+    state.streamClosedText = '';
+    state.nativePanelUpdateRequested = false;
     state.lastApprovalSignature = '';
     state.nativeCommand = null;
+    state.nativePageAction = null;
+    state.phase = 'idle';
     state.replyStream = null;
   }
 
@@ -1150,6 +1969,15 @@ class RemoteSessionController {
       clearTimeout(state.streamFinishTimer);
       state.streamFinishTimer = null;
     }
+    if (state.nativePageExitTimer) {
+      clearTimeout(state.nativePageExitTimer);
+      state.nativePageExitTimer = null;
+    }
+    if (state.nativePageActionTimer) {
+      clearTimeout(state.nativePageActionTimer);
+      state.nativePageActionTimer = null;
+    }
+    this.clearStreamHeartbeat(state);
     if (state.pendingReplyTimer) {
       clearTimeout(state.pendingReplyTimer);
       state.pendingReplyTimer = null;
@@ -1193,7 +2021,7 @@ class RemoteSessionController {
     return [
       'Commands:',
       '/start [cwd] - start or restart Codex',
-      '/stop - stop the current Codex session',
+      '/stop - interrupt the current task and keep Codex running',
       '/remote-status - show Remote Codex session status',
       '/status - send native Codex status command',
       '/resume - send native Codex resume command',
@@ -1284,12 +2112,21 @@ function findAnswerMarkerIndex(line) {
     const after = line.slice(match.index + match[0].length).trim();
     if (!after) continue;
     if (!isValidAnswerMarkerContext(before, after)) continue;
-    if (/^(?:Working|Thinking|Reading|Writing|Finding|Searching|Running|Checking|Applying|Planning)\b/i.test(after)) {
+    if (isLikelyProgressMarkerText(after)) {
       continue;
     }
     return match.index;
   }
   return -1;
+}
+
+function isLikelyProgressMarkerText(text) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  if (RUNNING_STATUS_PATTERN.test(value)) return true;
+  if (ACTIVITY_LINE_PATTERN.test(value)) return true;
+  if (isProgressWarning(value)) return true;
+  return false;
 }
 
 function isValidAnswerMarkerContext(before, after) {
@@ -1454,12 +2291,19 @@ function extractVisualTailBlock(lines, input) {
   const answer = [];
   let inCodeBlock = false;
   let skippingWarningContinuation = false;
+  let skippingProgressContinuation = false;
 
   for (const rawLine of lines) {
     const value = rawLine.trimEnd();
     const trimmed = value.trim();
     if (!trimmed) continue;
     if (BOX_ONLY_PATTERN.test(trimmed)) continue;
+    if (skippingProgressContinuation) {
+      if (/^\s{2,}\S/.test(value)) {
+        continue;
+      }
+      skippingProgressContinuation = false;
+    }
     if (skippingWarningContinuation) {
       if (/^\s{2,}\S/.test(value) || /^[\w:[\]()./_-]+/.test(trimmed)) {
         continue;
@@ -1468,6 +2312,11 @@ function extractVisualTailBlock(lines, input) {
     }
     if (/^⚠\s*(?:MCP client|MCP startup)/i.test(trimmed)) {
       skippingWarningContinuation = true;
+      continue;
+    }
+    const progressEntry = normalizeProgressEntry(trimmed);
+    if (progressEntry.isBullet && isLikelyProgressMarkerText(progressEntry.value)) {
+      skippingProgressContinuation = true;
       continue;
     }
     if (isLikelyPromptOrStatus(trimmed) || isVisualNoiseLine(trimmed, input)) {
@@ -1487,18 +2336,335 @@ function extractVisualTailBlock(lines, input) {
 
 function formatVisualProgressSnapshot(snapshot, inputText = '', options = {}) {
   const input = normalizeComparableText(inputText);
-  const lines = String(snapshot || '')
-    .split('\n')
-    .map((line) => line.trimEnd())
-    .filter((line) => line.trim())
-    .filter((line) => !BOX_ONLY_PATTERN.test(line.trim()));
+  const records = getSnapshotLineRecords(snapshot)
+    .filter((record) => record.text.trim())
+    .filter((record) => !BOX_ONLY_PATTERN.test(record.text.trim()));
+  const lines = records.map((record) => record.text);
   const promptIndex = findLastSubmittedPrompt(lines, input);
   if (input && promptIndex < 0) return '';
-  const afterPrompt = promptIndex >= 0 ? lines.slice(promptIndex + 1) : lines;
-  return renderCodexProgressState(parseCodexProgressState(afterPrompt, options));
+  const afterPrompt = promptIndex >= 0 ? records.slice(promptIndex + 1) : records;
+  return renderCodexProgressState(
+    parseCodexProgressState(afterPrompt, {
+      includeUnstructuredNotes: true,
+      ...options
+    }),
+    options
+  );
 }
 
-function formatNativeSlashOutput({ snapshot, raw, command, inputText } = {}) {
+function classifyVisualTurnOutput(snapshot, inputText = '', options = {}) {
+  const input = normalizeComparableText(inputText);
+  const records = getSnapshotLineRecords(snapshot)
+    .filter((record) => record.text.trim())
+    .filter((record) => !BOX_ONLY_PATTERN.test(record.text.trim()));
+  const lines = records.map((record) => record.text);
+  const promptIndex = findLastSubmittedPrompt(lines, input);
+  if (input && promptIndex < 0) return emptyTurnOutputClassification();
+
+  const afterPrompt = promptIndex >= 0 ? records.slice(promptIndex + 1) : records;
+  const approval = extractApprovalPrompt(afterPrompt.map((record) => record.text));
+  const entries = afterPrompt
+    .map((record) => normalizeProgressEntry(record))
+    .filter((entry) => entry.value)
+    .filter((entry) => isProgressWarning(entry.value) || !isProgressNoiseLine(entry.value));
+  const hasRunningStatus = entries.some((entry) => RUNNING_STATUS_PATTERN.test(entry.value));
+  const hasStructuredProgress = entries.some((entry) =>
+    isStructuredProgressEntry(entry)
+  );
+  const visualText = lines.join('\n');
+  const finalText =
+    extractClassifiedVisualFinalAnswer(afterPrompt, { active: hasRunningStatus }) ||
+    formatVisualSnapshot(visualText, inputText);
+  const finalComparable = normalizeComparableText(finalText);
+  const classified = emptyTurnOutputClassification();
+  classified.approval = approval;
+  classified.finalText = finalText;
+
+  let currentActivity = null;
+  for (const entry of entries) {
+    if (isClassifiedFinalDuplicate(entry.value, finalComparable)) continue;
+
+    if (isProgressWarning(entry.value)) {
+      pushUniqueString(classified.warnings, formatProgressWarning(entry.value));
+      currentActivity = null;
+      continue;
+    }
+
+    if (RUNNING_STATUS_PATTERN.test(entry.value)) {
+      const status = normalizeRunningStatus(entry.value);
+      if (/^(?:Working|Thinking)\b/i.test(status)) {
+        classified.status = {
+          text: status,
+          colorRole: entry.colorRole || '',
+          terminalColor: entry.terminalColor || ''
+        };
+        currentActivity = null;
+      } else {
+        currentActivity = addClassifiedActivity(classified, entry);
+      }
+      continue;
+    }
+
+    if (ACTIVITY_LINE_PATTERN.test(entry.value)) {
+      currentActivity = addClassifiedActivity(classified, entry);
+      pushUniqueString(classified.technical, entry.value);
+      continue;
+    }
+
+    if (currentActivity && isProgressDetailEntry(entry)) {
+      pushUniqueString(classified.technical, normalizeProgressDetail(entry.value));
+      continue;
+    }
+
+    if (currentActivity && entry.isIndented && isUsefulProgressNote(entry.value)) {
+      pushUniqueString(classified.explanations, normalizeProgressDetail(entry.value));
+      continue;
+    }
+
+    if (
+      entry.isBullet &&
+      (hasStructuredProgress || hasRunningStatus) &&
+      isUsefulProgressNote(entry.value)
+    ) {
+      pushUniqueString(classified.explanations, entry.value);
+      currentActivity = null;
+      continue;
+    }
+
+    if (
+      options.includeUnstructuredNotes !== false &&
+      hasRunningStatus &&
+      !entry.isBullet &&
+      !entry.isIndented &&
+      isUsefulProgressNote(entry.value)
+    ) {
+      pushUniqueString(classified.explanations, entry.value);
+      currentActivity = null;
+      continue;
+    }
+
+    if (isTechnicalProgressLine(entry.value)) {
+      pushUniqueString(classified.technical, entry.value);
+    }
+  }
+
+  return classified;
+}
+
+function formatClassifiedVisualTurnStream(snapshot, inputText = '', options = {}) {
+  const classified = classifyVisualTurnOutput(snapshot, inputText, options);
+  return renderClassifiedTurnStream(classified, options);
+}
+
+function renderClassifiedTurnStream(classified, options = {}) {
+  if (!classified) return '';
+  const progressLines = [];
+  const warningLines = [];
+  const finalText = String(options.finalText || '').trim();
+
+  if (classified.status?.text) {
+    const color =
+      classified.status.terminalColor ||
+      TERMINAL_ROLE_COLORS.running;
+    progressLines.push(`- ${withRemoteCodexColorMarker(classified.status.text, color, options)}`);
+  }
+
+  for (const explanation of classified.explanations || []) {
+    progressLines.push(`- ${withRemoteCodexColorMarker(explanation, TERMINAL_ROLE_COLORS.info, options)}`);
+  }
+
+  const seenActivitySummaries = new Set();
+  for (const activity of classified.activities || []) {
+    const summary = String(activity.summary || '').trim();
+    if (!summary || seenActivitySummaries.has(summary)) continue;
+    seenActivitySummaries.add(summary);
+    progressLines.push(`- ${withRemoteCodexColorMarker(summary, classifiedActivityColor(activity), options)}`);
+  }
+
+  for (const warning of classified.warnings || []) {
+    warningLines.push(`- ${withRemoteCodexColorMarker(warning, TERMINAL_ROLE_COLORS.warning, options)}`);
+  }
+
+  const sections = [];
+  if (warningLines.length > 0) {
+    sections.push(['**警告**', ...warningLines].join('\n'));
+  }
+  if (progressLines.length > 0) {
+    sections.push(['**进度**', ...progressLines].join('\n'));
+  }
+  if (finalText) {
+    sections.push(`**回复**\n${finalText}`);
+  }
+  return sections.join('\n\n').trim();
+}
+
+function classifiedActivityColor(activity) {
+  if (activity?.terminalColor) return activity.terminalColor;
+  if (activity?.colorRole && TERMINAL_ROLE_COLORS[activity.colorRole]) {
+    return TERMINAL_ROLE_COLORS[activity.colorRole];
+  }
+  return {
+    inspect: TERMINAL_ROLE_COLORS.command,
+    edit: TERMINAL_ROLE_COLORS.success,
+    verify: TERMINAL_ROLE_COLORS.command,
+    running: TERMINAL_ROLE_COLORS.running
+  }[activity?.kind] || TERMINAL_ROLE_COLORS.info;
+}
+
+function emptyTurnOutputClassification() {
+  return {
+    kind: 'turn',
+    status: null,
+    explanations: [],
+    activities: [],
+    technical: [],
+    warnings: [],
+    approval: null,
+    finalText: ''
+  };
+}
+
+function isClassifiedFinalDuplicate(value, finalComparable) {
+  if (!finalComparable) return false;
+  const comparable = normalizeComparableText(value);
+  return Boolean(comparable && finalComparable.includes(comparable));
+}
+
+function extractClassifiedVisualFinalAnswer(records, options = {}) {
+  if (!options.active) return '';
+  const lines = records.map((record) => normalizeSnapshotLineRecord(record).text);
+  const startIndex = findLastVisualAnswerStartIndex(lines);
+  if (startIndex < 0) return '';
+
+  const answer = [];
+  let inCodeBlock = false;
+  for (const line of lines.slice(startIndex)) {
+    const value = line.trim();
+    if (!value) continue;
+    if (answer.length > 0 && isLikelyPromptOrStatus(value)) break;
+    if (isVisualNoiseLine(value, '')) continue;
+
+    const markerIndex = findAnswerMarkerIndex(line);
+    if (markerIndex >= 0) {
+      const text = line
+        .slice(markerIndex)
+        .replace(FINAL_PREFIX_PATTERN, '')
+        .trimEnd();
+      if (text) answer.push(text);
+    } else {
+      appendVisualAnswerLine(answer, line, { inCodeBlock });
+    }
+    if (/^```/.test(value)) inCodeBlock = !inCodeBlock;
+  }
+
+  return normalizeCleanedText(answer.join('\n'));
+}
+
+function findLastVisualAnswerStartIndex(lines) {
+  const lastStructuredIndex = lines.findLastIndex((line) => {
+    const entry = normalizeProgressEntry(line);
+    return isStructuredProgressEntry(entry);
+  });
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (index <= lastStructuredIndex) return -1;
+    const value = String(lines[index] || '').trim();
+    if (!value || isLikelyPromptOrStatus(value) || isVisualNoiseLine(value, '')) continue;
+    const markerIndex = findAnswerMarkerIndex(lines[index]);
+    if (markerIndex < 0) continue;
+    const text = lines[index]
+      .slice(markerIndex)
+      .replace(FINAL_PREFIX_PATTERN, '')
+      .trim();
+    if (!text || isLikelyProgressMarkerText(text)) continue;
+    return index;
+  }
+  return -1;
+}
+
+function addClassifiedActivity(classified, entry) {
+  const activity = {
+    kind: classifyProgressActivityKind(entry.value),
+    summary: formatProgressActivity(entry.value),
+    text: entry.value,
+    colorRole: entry.colorRole || '',
+    terminalColor: entry.terminalColor || ''
+  };
+  const signature = `${activity.kind}:${activity.summary}:${activity.text}`;
+  if (!classified.activities.some((item) => `${item.kind}:${item.summary}:${item.text}` === signature)) {
+    classified.activities.push(activity);
+  }
+  return activity;
+}
+
+function classifyProgressActivityKind(value) {
+  const text = String(value || '').trim();
+  if (/^(?:Ran|Checked)\b/i.test(text)) return 'verify';
+  if (/^(?:Edited|Updated|Added|Removed|Created|Deleted|Applied|Wrote)\b/i.test(text)) {
+    return 'edit';
+  }
+  if (/^(?:Explored|Read|Opened|Searched|Found|Listed|Viewed)\b/i.test(text)) {
+    return 'inspect';
+  }
+  if (RUNNING_STATUS_PATTERN.test(text)) return 'running';
+  return 'other';
+}
+
+function pushUniqueString(list, value) {
+  const text = String(value || '').trim();
+  if (!text || list.includes(text)) return;
+  list.push(text);
+}
+
+function isTechnicalProgressLine(value) {
+  const text = String(value || '').trim();
+  if (!text) return false;
+  if (/^\$\s+/.test(text)) return true;
+  if (/^(?:└|├|│)\s+/.test(text)) return true;
+  if (/\b(?:src|scripts|test|tests|lib|app)\/[\w./-]+/.test(text)) return true;
+  if (/\b(?:npm|node|git|rg|sed|cat|python|pytest)\b/.test(text)) return true;
+  return false;
+}
+
+function getSnapshotLineRecords(snapshot) {
+  if (!snapshot) return [];
+
+  if (Array.isArray(snapshot)) {
+    return snapshot.map(normalizeSnapshotLineRecord).filter(Boolean);
+  }
+
+  if (typeof snapshot === 'object' && Array.isArray(snapshot.lines)) {
+    return snapshot.lines.map(normalizeSnapshotLineRecord).filter(Boolean);
+  }
+
+  return String(snapshot || '')
+    .split('\n')
+    .map((line) => normalizeSnapshotLineRecord(line))
+    .filter(Boolean);
+}
+
+function normalizeSnapshotLineRecord(line) {
+  if (line && typeof line === 'object') {
+    return {
+      text: String(line.text || '').trimEnd(),
+      firstChar: String(line.firstChar || ''),
+      firstStyle: normalizeTerminalStyle(line.firstStyle),
+      bulletStyle: normalizeTerminalStyle(line.bulletStyle)
+    };
+  }
+
+  return {
+    text: String(line || '').trimEnd(),
+    firstChar: '',
+    firstStyle: null,
+    bulletStyle: null
+  };
+}
+
+function getSnapshotTextLines(snapshot) {
+  return getSnapshotLineRecords(snapshot).map((record) => record.text);
+}
+
+function formatNativeSlashOutput({ snapshot, raw, command, inputText, colorMarkers = false } = {}) {
   const normalizedCommand = normalizeNativeCodexCommand(command);
   const visualLines = collectNativeVisualLines(snapshot);
   const rawLines = collectNativeRawLines(raw);
@@ -1514,7 +2680,7 @@ function formatNativeSlashOutput({ snapshot, raw, command, inputText } = {}) {
   }
 
   if (normalizedCommand === '/status') {
-    return formatStatusSlashOutput(lines, inputText);
+    return formatStatusSlashOutput(lines, inputText, { colorMarkers });
   }
 
   return formatGenericSlashOutput(lines, normalizedCommand, inputText);
@@ -1549,7 +2715,7 @@ function formatResumeSlashOutput(lines, inputText = '') {
       intro: '选择要恢复的历史会话。',
       options,
       pageSize: 8,
-      footer: '点击卡片里的 Up/Down/Enter，或发送 `/up`、`/down`、`/enter`。'
+      footer: '点击卡片里的上移/下移/恢复，或发送 `/up`、`/down`、`/enter`。'
     });
   }
 
@@ -1570,29 +2736,84 @@ function formatResumeSlashOutput(lines, inputText = '') {
 }
 
 function formatPermissionsSlashOutput(lines, inputText = '') {
-  const options = extractPickerOptions(lines);
-  if (options.length > 0) {
-    return renderPickerPage({
-      title: '**权限选项**',
-      intro: findNativeTitleLine(lines, ['Update Model Permissions']) || '选择 Codex 权限模式。',
-      options,
-      pageSize: 5,
-      footer: '点击 Up/Down/Enter 选择，或发送 `/esc` 返回。'
-    });
-  }
-
   const disabled = findNativeSlashDisabledMessage(lines, '/permissions');
   if (disabled) {
     return ['**/permissions**', `- ${disabled}`, '', '当前 Codex 还在处理任务；等任务结束后再调整权限。'].join('\n');
   }
 
-  return suppressNativeIntroOnly(formatGenericSlashOutput(lines, '/permissions', inputText, {
-    title: '**权限**',
-    emptyText: '当前没有可解析的权限面板内容。'
-  }));
+  const options = extractPermissionsPickerOptions(lines);
+  if (options.length === 3) {
+    return renderPermissionsPickerPage(options);
+  }
+
+  return formatPermissionsLoadingText();
 }
 
-function formatStatusSlashOutput(lines, inputText = '') {
+function extractPermissionsPickerOptions(lines) {
+  const titleIndex = lines.findLastIndex((rawLine) =>
+    /^Update Model Permissions$/i.test(normalizeNativeLine(rawLine))
+  );
+  if (titleIndex < 0) return [];
+
+  const options = extractPickerOptions(lines.slice(titleIndex + 1))
+    .filter((option) => option.index >= 1 && option.index <= 3)
+    .map(normalizePermissionsPickerOption)
+    .filter(Boolean);
+  const expectedNames = ['Default', 'Auto-review', 'Full Access'];
+  if (
+    options.length !== expectedNames.length ||
+    options.some((option, index) =>
+      option.index !== index + 1 ||
+      !option.text.toLowerCase().startsWith(expectedNames[index].toLowerCase())
+    )
+  ) {
+    return [];
+  }
+  return options;
+}
+
+function normalizePermissionsPickerOption(option) {
+  const match = String(option?.text || '').match(
+    /^(Default(?:\s+\(current\))?|Auto-review|Full Access)(?=\s|$)\s*(.*)$/i
+  );
+  if (!match) return null;
+  const details = [...(option.details || [])];
+  if (match[2]) details.unshift(match[2]);
+  return {
+    ...option,
+    text: match[1],
+    details
+  };
+}
+
+function renderPermissionsPickerPage(options) {
+  const selected = options.find((option) => option.selected);
+  const lines = [
+    '**权限模式**',
+    `- 当前模式: \`${selected ? selected.text.replace(/\s*\(current\)\s*/i, '') : '未标记'}\``,
+    '- 点击下方模式按钮会立即应用，不需要再确认。',
+    '',
+    '**模式**'
+  ];
+  for (const option of options) {
+    const prefix = option.selected ? '>' : '-';
+    lines.push(`${prefix} ${option.index}. ${option.text}`);
+    for (const detail of option.details.slice(0, 1)) {
+      lines.push(`  ${detail}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+function formatPermissionsLoadingText() {
+  return [
+    '**权限模式**',
+    '- 正在读取当前权限模式。',
+    '- 可直接选择 Default、Auto-review 或 Full Access。'
+  ].join('\n');
+}
+
+function formatStatusSlashOutput(lines, inputText = '', options = {}) {
   const normalized = lines
     .map((line) => normalizeNativeLine(line))
     .filter(Boolean);
@@ -1602,13 +2823,15 @@ function formatStatusSlashOutput(lines, inputText = '') {
   const panelLines = panelStart >= 0 ? normalized.slice(panelStart) : normalized;
   const useful = selectUsefulNativeLines(panelLines, '/status', inputText)
     .filter((line) => !/^Tip:/i.test(line))
+    .filter((line) => !/^Visit\s+https?:\/\/chatgpt\.com\/codex\/settings\/usage\b/i.test(line))
+    .filter((line) => !/^information on rate limits and credits\b/i.test(line))
     .filter((line) => !/^model:\s+.*\/model to change/i.test(line))
     .filter((line) => !/^directory:\s+~/i.test(line) || /^Directory:/i.test(line));
 
   if (useful.length === 0) return '';
   const status = parseCodexStatusLines(useful);
   if (status.hasStructuredData) {
-    return renderCodexStatusPanel(status);
+    return renderCodexStatusPanel(status, options);
   }
   return ['**Codex 状态**', ...useful.slice(0, 16).map((line) => `- ${line}`)].join('\n');
 }
@@ -1632,9 +2855,6 @@ function parseCodexStatusLines(lines) {
 
     const fieldMatch = line.match(/^([^:]{2,36}):\s+(.+)$/);
     if (!fieldMatch) {
-      if (/^Visit\s+https?:\/\//i.test(line) || /^information on\b/i.test(line)) {
-        status.intro.push(line);
-      }
       continue;
     }
 
@@ -1673,7 +2893,7 @@ function parseCodexUsageField(key, value) {
   };
 }
 
-function renderCodexStatusPanel(status) {
+function renderCodexStatusPanel(status, options = {}) {
   const lines = ['**Codex 状态**'];
   if (status.version) lines.push(`- 版本: \`${status.version}\``);
 
@@ -1684,12 +2904,26 @@ function renderCodexStatusPanel(status) {
         ? `${usage.percentLeft}% 剩余`
         : usage.text;
       const reset = usage.reset ? `，重置 ${usage.reset.replace(/^resets\s*/i, '')}` : '';
-      const warning = Number.isFinite(usage.percentLeft) && usage.percentLeft <= 25
-        ? '低余量 '
-        : '';
-      lines.push(`- ${usage.label}: ${warning}${remaining}${reset}`);
-      if (usage.bar) lines.push(`  ${usage.bar}`);
+      const level = getUsageLevel(usage.percentLeft);
+      lines.push(withRemoteCodexLineColorMarker(
+        `- ${usage.label}: ${level.label} ${remaining}${reset}`,
+        level.color,
+        options
+      ));
+      if (usage.bar) {
+        lines.push(withRemoteCodexColorMarker(`  ${usage.bar}`, level.color, options));
+      }
     }
+  } else if (hasUsefulStatusFields(status)) {
+    lines.push(
+      '',
+      '**用量提示**',
+      withRemoteCodexLineColorMarker(
+        '- 本次 `/status` 没有返回剩余用量信息；可以稍后重新发送 `/status` 重试。',
+        TERMINAL_ROLE_COLORS.info,
+        options
+      )
+    );
   }
 
   const fieldLines = [
@@ -1717,6 +2951,28 @@ function renderCodexStatusPanel(status) {
   }
 
   return lines.join('\n');
+}
+
+function hasUsefulStatusFields(status) {
+  return Boolean(
+    status?.fields?.model?.value ||
+      status?.fields?.permissions?.value ||
+      status?.fields?.directory?.value ||
+      status?.fields?.session?.value
+  );
+}
+
+function getUsageLevel(percentLeft) {
+  if (!Number.isFinite(percentLeft)) {
+    return { label: '用量信息', color: TERMINAL_ROLE_COLORS.info };
+  }
+  if (percentLeft <= 25) {
+    return { label: '余量紧张', color: TERMINAL_ROLE_COLORS.error };
+  }
+  if (percentLeft <= 60) {
+    return { label: '余量适中', color: TERMINAL_ROLE_COLORS.warning };
+  }
+  return { label: '余量充足', color: TERMINAL_ROLE_COLORS.success };
 }
 
 function normalizeStatusFieldKey(key) {
@@ -1980,6 +3236,7 @@ function isNativeSlashNoiseLine(line, command) {
   if (command && value === command) return true;
   if (/^tab to queue message/i.test(value)) return true;
   if (/^(?:Press enter to confirm|esc to go back|esc to cancel)$/i.test(value)) return true;
+  if (/^(?:enter resume|esc exit)\b/i.test(value)) return true;
   if (/^gpt-[\w.-]+\s+\w+/i.test(value) && /[~/]|·/.test(value)) return true;
   if (/^Booting MCP server:/i.test(value)) return true;
   if (/^MCP startup/i.test(value)) return true;
@@ -1998,11 +3255,15 @@ function formatTerminalProgress(data, options = {}) {
     .split('\n')
     .map((line) => line.trimEnd())
     .filter((line) => line.trim());
-  return renderCodexProgressState(parseCodexProgressState(lines, options));
+  return renderCodexProgressState(parseCodexProgressState(lines, options), options);
 }
 
 function parseCodexProgressState(lines, options = {}) {
-  const approvalPrompt = extractApprovalPrompt(lines);
+  const records = Array.isArray(lines)
+    ? lines.map(normalizeSnapshotLineRecord).filter(Boolean)
+    : getSnapshotLineRecords(lines);
+  const textLines = records.map((record) => record.text);
+  const approvalPrompt = extractApprovalPrompt(textLines);
   if (approvalPrompt) {
     return {
       kind: 'approval',
@@ -2013,19 +3274,30 @@ function parseCodexProgressState(lines, options = {}) {
   const state = {
     kind: 'progress',
     status: '',
+    statusColorRole: '',
+    statusTerminalColor: '',
     items: []
   };
   const finalComparable = normalizeComparableText(options.finalText || '');
+  const entries = records
+    .map((record) => normalizeProgressEntry(record))
+    .filter((entry) => entry.value)
+    .filter((entry) => isProgressWarning(entry.value) || !isProgressNoiseLine(entry.value))
+    .filter((entry) => !isProgressFinalDuplicate(entry.value, finalComparable));
+  const hasRunningStatus = entries.some((entry) => RUNNING_STATUS_PATTERN.test(entry.value));
+  const hasStructuredProgress = entries.some((entry) =>
+    isStructuredProgressEntry(entry)
+  );
   let current = null;
 
-  for (const rawLine of lines) {
-    const entry = normalizeProgressEntry(rawLine);
-    if (!entry.value) continue;
-    if (isProgressNoiseLine(entry.value)) continue;
-    if (isProgressFinalDuplicate(entry.value, finalComparable)) continue;
-
+  for (const entry of entries) {
     if (isProgressWarning(entry.value)) {
-      current = addProgressItem(state, 'warning', formatProgressWarning(entry.value));
+      current = addProgressItem(
+        state,
+        'warning',
+        formatProgressWarning(entry.value),
+        entry
+      );
       continue;
     }
 
@@ -2033,15 +3305,23 @@ function parseCodexProgressState(lines, options = {}) {
       const status = normalizeRunningStatus(entry.value);
       if (/^(?:Working|Thinking)\b/i.test(status)) {
         state.status = status;
+        state.statusColorRole = entry.colorRole;
+        state.statusTerminalColor = entry.terminalColor;
         current = null;
       } else {
-        current = addProgressItem(state, 'running', status);
+        current = addProgressItem(state, 'running', status, entry);
       }
       continue;
     }
 
     if (ACTIVITY_LINE_PATTERN.test(entry.value)) {
-      current = addProgressItem(state, 'activity', entry.value);
+      current = addProgressItem(
+        state,
+        'activity',
+        formatProgressActivity(entry.value),
+        entry,
+        { allowDetails: false }
+      );
       continue;
     }
 
@@ -2050,36 +3330,77 @@ function parseCodexProgressState(lines, options = {}) {
       continue;
     }
 
-    if (entry.isBullet && isUsefulProgressNote(entry.value)) {
-      current = addProgressItem(state, 'note', entry.value);
+    if (current && entry.isIndented && isUsefulProgressNote(entry.value)) {
+      addProgressDetail(current, normalizeProgressDetail(entry.value));
+      continue;
+    }
+
+    if (
+      entry.isBullet &&
+      (hasStructuredProgress || hasRunningStatus) &&
+      isUsefulProgressNote(entry.value)
+    ) {
+      current = addProgressItem(state, 'note', entry.value, entry);
+      continue;
+    }
+
+    if (
+      options.includeUnstructuredNotes &&
+      hasRunningStatus &&
+      !entry.isBullet &&
+      !entry.isIndented &&
+      isUsefulProgressNote(entry.value)
+    ) {
+      current = addProgressItem(state, 'note', entry.value, entry);
     }
   }
 
-  state.items = compactProgressItems(state.items).slice(-8);
+  state.items = limitProgressItems(compactProgressItems(state.items));
   return state;
 }
 
-function renderCodexProgressState(state) {
+function isStructuredProgressEntry(entry) {
+  if (!entry?.value) return false;
+  return (
+    isProgressWarning(entry.value) ||
+    RUNNING_STATUS_PATTERN.test(entry.value) ||
+    ACTIVITY_LINE_PATTERN.test(entry.value)
+  );
+}
+
+function renderCodexProgressState(state, options = {}) {
   if (!state) return '';
   if (state.kind === 'approval') {
     return formatApprovalPrompt(state.approval);
   }
 
   const items = [];
-  if (state.status) items.push({ type: 'status', text: state.status, details: [] });
+  if (state.status) {
+    items.push({
+      type: 'status',
+      text: state.status,
+      details: [],
+      colorRole: state.statusColorRole || '',
+      terminalColor: state.statusTerminalColor || ''
+    });
+  }
   items.push(...(state.items || []));
   if (items.length === 0) return '';
 
   return [
     '**进度**',
-    ...items.flatMap((item) => formatProgressItem(item.text, item.details))
+    ...items.flatMap((item) => formatProgressItem(item, options))
   ].join('\n');
 }
 
 function normalizeProgressEntry(line) {
-  const raw = String(line || '').trimEnd();
+  const record = line && typeof line === 'object' ? normalizeSnapshotLineRecord(line) : null;
+  const raw = String(record?.text ?? line ?? '').trimEnd();
   const trimmed = raw.trim();
   const bulletMatch = trimmed.match(/^([•●◦○■])\s*(.*)$/);
+  const bulletStyle = record?.bulletStyle || null;
+  const firstStyle = record?.firstStyle || null;
+  const terminalStyle = bulletStyle || firstStyle;
   const value = (bulletMatch ? bulletMatch[2] : trimmed)
     .replace(/\s+•\s*esc to interrupt\b/i, '')
     .replace(/\s+/g, ' ')
@@ -2092,8 +3413,120 @@ function normalizeProgressEntry(line) {
     bullet: bulletMatch?.[1] || '',
     isBullet: Boolean(bulletMatch),
     isIndented: /^\s{2,}\S/.test(raw),
-    isTree: /^[└├│]\s*/.test(value)
+    isTree: /^[└├│]\s*/.test(value),
+    firstStyle,
+    bulletStyle,
+    colorRole: classifyTerminalColorRole(terminalStyle),
+    terminalColor: terminalStyleToRgbaColor(terminalStyle)
   };
+}
+
+function normalizeTerminalStyle(style) {
+  if (!style || typeof style !== 'object') return null;
+  return {
+    fgMode: normalizeTerminalColorMode(style.fgMode),
+    fg: normalizeFiniteNumber(style.fg),
+    bgMode: normalizeTerminalColorMode(style.bgMode),
+    bg: normalizeFiniteNumber(style.bg),
+    bold: Boolean(style.bold),
+    dim: Boolean(style.dim),
+    italic: Boolean(style.italic)
+  };
+}
+
+function normalizeTerminalColorMode(mode) {
+  return mode === 'rgb' || mode === 'palette' ? mode : 'default';
+}
+
+function normalizeFiniteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function classifyTerminalColorRole(style) {
+  if (!style) return '';
+
+  const normalized = normalizeTerminalStyle(style);
+  if (!normalized) return '';
+  if (normalized.fgMode === 'palette') {
+    return classifyPaletteColorRole(normalized.fg, normalized);
+  }
+  if (normalized.fgMode === 'rgb') {
+    return classifyRgbColorRole(normalized.fg, normalized);
+  }
+  if (normalized.dim) return 'muted';
+  if (normalized.bold) return 'emphasis';
+  return '';
+}
+
+function terminalStyleToRgbaColor(style) {
+  if (!style) return '';
+
+  const normalized = normalizeTerminalStyle(style);
+  if (!normalized) return '';
+  if (normalized.fgMode === 'palette') {
+    return paletteColorToRgba(normalized.fg);
+  }
+  if (normalized.fgMode === 'rgb') {
+    return rgbNumberToRgba(normalized.fg);
+  }
+  if (normalized.dim) return TERMINAL_ROLE_COLORS.muted;
+  return '';
+}
+
+function paletteColorToRgba(color) {
+  const rgb = TERMINAL_THEME_PALETTE[Number(color)];
+  return rgb ? rgbArrayToRgba(rgb) : '';
+}
+
+function rgbNumberToRgba(color) {
+  const value = Number(color);
+  if (!Number.isFinite(value)) return '';
+  return rgbArrayToRgba([
+    (value >> 16) & 0xff,
+    (value >> 8) & 0xff,
+    value & 0xff
+  ]);
+}
+
+function rgbArrayToRgba(rgb) {
+  if (!Array.isArray(rgb) || rgb.length < 3) return '';
+  const [red, green, blue] = rgb.map((value) =>
+    Math.max(0, Math.min(255, Number(value) || 0))
+  );
+  return `rgba(${red},${green},${blue},1)`;
+}
+
+function classifyPaletteColorRole(color, style = {}) {
+  const index = Number(color);
+  if ([1, 9].includes(index)) return 'error';
+  if ([2, 10].includes(index)) return 'success';
+  if ([3, 11].includes(index)) return 'warning';
+  if ([4, 12].includes(index)) return 'command';
+  if ([5, 6, 13, 14].includes(index)) return 'info';
+  if (index === 8 || style.dim) return 'muted';
+  if (style.bold) return 'emphasis';
+  return '';
+}
+
+function classifyRgbColorRole(color, style = {}) {
+  const value = Number(color);
+  if (!Number.isFinite(value)) return '';
+
+  const red = (value >> 16) & 0xff;
+  const green = (value >> 8) & 0xff;
+  const blue = value & 0xff;
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+
+  if (style.dim || (max - min <= 24 && max < 170)) return 'muted';
+  if (red >= 180 && green < 150 && blue < 160) return 'error';
+  if (green >= 150 && red < 190 && blue < 180) return 'success';
+  if (red >= 180 && green >= 150 && blue < 150) return 'warning';
+  if (blue >= 170 && red < 180 && green < 200) return 'command';
+  if ((green >= 170 && blue >= 170) || (red >= 150 && blue >= 150)) return 'info';
+  if (style.bold) return 'emphasis';
+  return '';
 }
 
 function normalizeProgressLine(line) {
@@ -2107,12 +3540,75 @@ function normalizeRunningStatus(line) {
     .trim();
 }
 
-function formatProgressItem(text, details = []) {
-  const lines = [`- ${text}`];
+function formatProgressItem(item, options = {}) {
+  const text = typeof item === 'string' ? item : item?.text;
+  const details = typeof item === 'string' ? [] : item?.details || [];
+  const color = progressItemColor(item);
+  const lines = [`- ${withRemoteCodexColorMarker(text, color, options)}`];
   for (const detail of details) {
-    lines.push(`  ${detail}`);
+    lines.push(`  ${withRemoteCodexColorMarker(detail, TERMINAL_ROLE_COLORS.muted, options)}`);
   }
   return lines;
+}
+
+function withRemoteCodexColorMarker(text, color, options = {}) {
+  const value = String(text || '').trim();
+  if (!options.colorMarkers || !color) return value;
+  return `${REMOTE_CODEX_COLOR_MARKER_PREFIX}${color}${REMOTE_CODEX_COLOR_MARKER_SUFFIX}${value}`;
+}
+
+function withRemoteCodexLineColorMarker(line, color, options = {}) {
+  const value = String(line || '').trimEnd();
+  if (!options.colorMarkers || !color) return value;
+  const match = value.match(/^(\s*-\s+)([\s\S]*)$/);
+  if (match) {
+    return `${match[1]}${withRemoteCodexColorMarker(match[2], color, options)}`;
+  }
+  return withRemoteCodexColorMarker(value, color, options);
+}
+
+function stripRemoteCodexColorMarkers(text) {
+  return String(text || '').replace(/<!--remote-codex-color:[^>]+-->/g, '');
+}
+
+function remoteMessageSignature(text) {
+  const value = stripRemoteCodexColorMarkers(text)
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .trim();
+  if (!value) return '';
+
+  if (/^\*\*Codex 状态\*\*/.test(value)) {
+    return `status:${value
+      .replace(/\[[█░\s]+\]/g, '[bar]')
+      .replace(/[ \t\n]+/g, ' ')
+      .trim()}`;
+  }
+
+  return value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+function isWorkingStatusLine(line) {
+  const value = stripRemoteCodexColorMarkers(line).trim();
+  return /^-\s+(?:Working|Codex 正在处理)\s+\(\d+s\)\s*$/.test(value);
+}
+
+function progressItemColor(item) {
+  if (!item || typeof item === 'string') return '';
+  if (item.terminalColor) return item.terminalColor;
+  if (item.colorRole && TERMINAL_ROLE_COLORS[item.colorRole]) {
+    return TERMINAL_ROLE_COLORS[item.colorRole];
+  }
+  if (item.type === 'status' || item.type === 'running') {
+    return TERMINAL_ROLE_COLORS.running;
+  }
+  if (item.type === 'warning') return TERMINAL_ROLE_COLORS.warning;
+  if (item.type === 'activity') return TERMINAL_ROLE_COLORS.command;
+  return '';
 }
 
 function isProgressNoiseLine(line) {
@@ -2138,20 +3634,50 @@ function formatProgressWarning(value) {
   return /^⚠/.test(value) ? value : `Error: ${value}`;
 }
 
-function addProgressItem(state, type, text) {
+function formatProgressActivity(value) {
+  const text = String(value || '').trim();
+  if (/^(?:Ran|Checked)\b/i.test(text)) return '正在验证';
+  if (/^(?:Edited|Updated|Added|Removed|Created|Deleted|Applied|Wrote)\b/i.test(text)) {
+    return '正在修改';
+  }
+  if (/^(?:Explored|Read|Opened|Searched|Found|Listed|Viewed)\b/i.test(text)) {
+    return '正在检查代码';
+  }
+  return '正在处理';
+}
+
+function addProgressItem(state, type, text, entry = null, options = {}) {
   const value = String(text || '').trim();
   if (!value) return null;
+  const colorRole = entry?.colorRole || '';
+  const terminalColor = entry?.terminalColor || '';
+  const allowDetails = options.allowDetails !== false;
   const previous = state.items[state.items.length - 1];
-  if (previous && previous.type === type && previous.text === value) {
+  if (
+    previous &&
+    previous.type === type &&
+    previous.text === value &&
+    previous.colorRole === colorRole &&
+    previous.terminalColor === terminalColor &&
+    previous.allowDetails === allowDetails
+  ) {
     return previous;
   }
-  const item = { type, text: value, details: [] };
+  const item = {
+    type,
+    text: value,
+    details: [],
+    colorRole,
+    terminalColor,
+    allowDetails
+  };
   state.items.push(item);
   return item;
 }
 
 function addProgressDetail(item, detail) {
   if (!item || !detail) return;
+  if (item.allowDetails === false) return;
   if (item.details[item.details.length - 1] === detail) return;
   item.details.push(detail);
   if (item.details.length > 5) {
@@ -2207,8 +3733,30 @@ function compactProgressItems(items) {
   return compacted;
 }
 
+function limitProgressItems(items, limit = PROGRESS_ITEM_LIMIT) {
+  const safeLimit = Math.max(1, Number(limit) || PROGRESS_ITEM_LIMIT);
+  if (items.length <= safeLimit) return items;
+
+  const keepIndexes = new Set();
+  for (let index = 0; index < items.length; index += 1) {
+    if (items[index].type === 'note') keepIndexes.add(index);
+  }
+
+  for (
+    let index = items.length - 1;
+    keepIndexes.size < safeLimit && index >= 0;
+    index -= 1
+  ) {
+    keepIndexes.add(index);
+  }
+
+  return items
+    .filter((_item, index) => keepIndexes.has(index))
+    .slice(-safeLimit);
+}
+
 function progressItemSignature(item) {
-  return `${item.type}:${item.text}:${(item.details || []).join('|')}`;
+  return `${item.type}:${item.colorRole || ''}:${item.terminalColor || ''}:${item.text}:${(item.details || []).join('|')}`;
 }
 
 function extractApprovalPrompt(lines) {
@@ -2229,8 +3777,8 @@ function extractApprovalPrompt(lines) {
   const reason = block.find((line) => /^Reason:/i.test(line)) || '';
   const commandLine = block.find((line) => /^\$\s+/.test(line)) || '';
   const options = block
-    .filter((line) => /^(?:>\s*)?\d+\.\s+/.test(line))
-    .map((line) => line.replace(/^>\s*/, '').trim());
+    .map(parseApprovalOptionLine)
+    .filter(Boolean);
 
   return {
     status: statusLine ? normalizeProgressLine(statusLine) : '',
@@ -2239,6 +3787,40 @@ function extractApprovalPrompt(lines) {
     command: commandLine.replace(/^\$\s+/, '').trim(),
     options
   };
+}
+
+function parseApprovalOptionLine(line) {
+  const value = String(line || '').trim();
+  const match = value.match(/^([>›❯]?\s*)?(\d+)[.)]\s+(.+)$/);
+  if (!match) return null;
+  return {
+    selected: /[>›❯]/.test(match[1] || ''),
+    index: Number(match[2]),
+    text: match[3].trim()
+  };
+}
+
+function normalizeApprovalOption(option) {
+  if (option && typeof option === 'object') {
+    return {
+      selected: Boolean(option.selected),
+      index: Number(option.index) || 0,
+      text: String(option.text || '').trim()
+    };
+  }
+
+  const parsed = parseApprovalOptionLine(option);
+  if (parsed) return parsed;
+  return {
+    selected: false,
+    index: 0,
+    text: String(option || '').replace(/^\d+[.)]\s*/, '').trim()
+  };
+}
+
+function formatApprovalOptionSignature(option) {
+  const normalized = normalizeApprovalOption(option);
+  return `${normalized.selected ? '>' : '-'}${normalized.index}:${normalized.text}`;
 }
 
 function isApprovalQuestionLine(line) {
@@ -2260,7 +3842,9 @@ function formatApprovalPrompt(prompt) {
   if (prompt.options.length > 0) {
     lines.push('', '**选项**');
     for (const option of prompt.options) {
-      lines.push(`- ${option}`);
+      const parsed = normalizeApprovalOption(option);
+      const prefix = parsed.selected ? '>' : '-';
+      lines.push(`${prefix} ${parsed.index}. ${parsed.text}`);
     }
   }
   lines.push('', '可在卡片按钮中选择，也可以发送 `/approve`、`/always` 或 `/deny`。');
@@ -2369,6 +3953,7 @@ function formatStatusPanelText(payload) {
 
   const session = payload.session;
   lines.push(payload.running ? 'Remote Codex 会话运行中。' : 'Remote Codex 会话未运行。');
+  lines.push(`状态: ${formatRemoteSessionPhase(payload.phase)}`);
   lines.push(`模式: ${payload.source || 'visual_terminal'}`);
   lines.push(`cwd: ${session.cwd || 'unknown'}`);
   if (session.id) lines.push(`id: ${session.id}`);
@@ -2395,6 +3980,15 @@ function formatPermissionPanelText(payload) {
     if (payload.approval.command) {
       lines.push('', payload.approval.command);
     }
+    if (payload.approval.options?.length > 0) {
+      lines.push('', '选项:');
+      for (const option of payload.approval.options) {
+        const parsed = normalizeApprovalOption(option);
+        const prefix = parsed.selected ? '>' : '-';
+        const index = parsed.index ? `${parsed.index}. ` : '';
+        lines.push(`${prefix} ${index}${parsed.text}`.trimEnd());
+      }
+    }
     lines.push('', '发送 /approve、/always 或 /deny 处理；也可以用 /up、/down、/enter 精确选择。');
     return lines.join('\n').trim();
   }
@@ -2414,9 +4008,24 @@ function formatCommandPanelText(payload) {
     '/permission - 打开 Codex 原生权限面板',
     '/status - 打开 Codex 原生状态面板',
     '/tail - 查看最近输出',
-    '/stop - 停止远程会话',
+    '/stop - 中断当前任务，保留 Codex 会话',
     '/remote-status - 查看 Remote Codex 自身状态'
   ].join('\n');
+}
+
+function formatRemoteSessionPhase(phase) {
+  return {
+    detached: '未接入',
+    exited: '已退出',
+    idle: '等待命令',
+    working: '正在处理',
+    loading_plugins: '正在加载插件',
+    awaiting_authorization: '等待授权',
+    native_resume: '历史会话选择',
+    native_permissions: '权限模式选择',
+    native_status: 'Codex 状态页',
+    native_page: 'Codex 特殊页面'
+  }[String(phase || '')] || String(phase || '未知');
 }
 
 function clipForLog(text, max = 1200) {
@@ -2443,7 +4052,116 @@ function isVisualSessionBusy(state) {
   if (!state || !state.turnStartedAt) return false;
   if (state.lastReplyText || state.pendingReplyText) return false;
   if (state.session?.status?.().exited) return false;
+  if (isVisualTurnSettled(state) || isStaleVisualBusyState(state)) return false;
   return true;
+}
+
+function detectRemoteSessionPhase(state, approval = null) {
+  if (!state?.session) return 'detached';
+  if (state.session.status?.().exited) return 'exited';
+  if (approval) return 'awaiting_authorization';
+
+  const command = state.nativeCommand?.command
+    ? normalizeNativeCodexCommand(state.nativeCommand.command)
+    : '';
+  if (command === '/resume') return 'native_resume';
+  if (command === '/permissions') return 'native_permissions';
+  if (command === '/status') return 'native_status';
+  if (command) return 'native_page';
+
+  const snapshot = String(
+    state.session.visualViewportSnapshot ||
+      state.session.visualSnapshot ||
+      ''
+  );
+  if (/(?:Booting MCP server|MCP startup|Starting MCP)/i.test(snapshot)) {
+    return 'loading_plugins';
+  }
+  if (state.turnStartedAt && !state.lastReplyText && !state.pendingReplyText) {
+    return 'working';
+  }
+  return 'idle';
+}
+
+function detectVisualSessionPhase(session, approval = null) {
+  if (!session) return 'detached';
+  if (session.status?.().exited) return 'exited';
+  if (approval) return 'awaiting_authorization';
+
+  const snapshot = String(
+    session.visualViewportSnapshot ||
+      session.visualSnapshot ||
+      ''
+  );
+  if (/(?:Booting MCP server|MCP startup|Starting MCP)/i.test(snapshot)) {
+    return 'loading_plugins';
+  }
+  if (hasActiveVisualIndicators(snapshot)) return 'working';
+  if (hasVisibleIdlePrompt(snapshot)) return 'idle';
+  return 'idle';
+}
+
+function isVisualTurnSettled(state) {
+  if (!state?.session) return false;
+  const snapshot = state.session.visualSnapshot || state.session.visualViewportSnapshot || '';
+  if (hasVisibleIdlePrompt(snapshot) && !hasActiveVisualIndicators(snapshot)) {
+    return true;
+  }
+  return hasIdlePromptAfterSubmittedPrompt(snapshot, state.lastInputText);
+}
+
+function isStaleVisualBusyState(state) {
+  if (!state?.turnStartedAt || !state?.session) return false;
+  const elapsedMs = Date.now() - Number(state.turnStartedAt || 0);
+  if (elapsedMs < VISUAL_BUSY_STALE_MS) return false;
+  const snapshot = state.session.visualSnapshot || state.session.visualViewportSnapshot || '';
+  return hasVisibleIdlePrompt(snapshot) && !hasActiveVisualIndicators(snapshot);
+}
+
+function hasVisibleIdlePrompt(snapshot) {
+  return getSnapshotTextLines(snapshot)
+    .map((line) => line.trim())
+    .some((line) => /^›\s*$/.test(line));
+}
+
+function hasActiveVisualIndicators(snapshot) {
+  return getSnapshotTextLines(snapshot)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .some((line) =>
+      RUNNING_STATUS_PATTERN.test(line) ||
+      /^-\s+(?:Working|Thinking|Running)\b/i.test(line) ||
+      SPINNER_PATTERN.test(line) ||
+      isApprovalQuestionLine(line) ||
+      /^Running shell command\b/i.test(line) ||
+      /^Would you like to\b/i.test(line) ||
+      /^Do you want to\b/i.test(line)
+    );
+}
+
+function hasIdlePromptAfterSubmittedPrompt(snapshot, inputText = '') {
+  const input = normalizeComparableText(inputText);
+  const lines = getSnapshotTextLines(snapshot)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim());
+  const promptIndex = findLastSubmittedPrompt(lines, input);
+  if (input && promptIndex < 0) return false;
+
+  const afterPrompt = promptIndex >= 0 ? lines.slice(promptIndex + 1) : lines;
+  return afterPrompt.some((line) => /^›\s*$/.test(line.trim()));
+}
+
+function readSessionOutputTail(session, limit = 80) {
+  if (!session?.readAfter) return '';
+  try {
+    const cursor = Math.max(0, Number(session.cursor || 0) - limit);
+    return session
+      .readAfter(cursor)
+      .chunks.map((chunk) => chunk.data)
+      .join('');
+  } catch {
+    return '';
+  }
 }
 
 function formatVisualBusyText(state) {
@@ -2508,6 +4226,11 @@ function parseKeyCommand(command) {
   return '';
 }
 
+function parsePermissionModeCommand(command) {
+  const value = String(command || '').replace(/^\//, '').toLowerCase();
+  return isPermissionModeControlAction(value) ? value : '';
+}
+
 function buildControlInput(action) {
   const value = String(action || '').toLowerCase();
   if (value === 'approve' || value === 'yes') return 'y';
@@ -2526,6 +4249,84 @@ function buildControlInput(action) {
   return '';
 }
 
+function buildNativeControlInput(state, action) {
+  const value = String(action || '').toLowerCase();
+  if (isPermissionModeControlAction(value)) {
+    return buildPermissionModeControlInput(state, value);
+  }
+  return buildControlInput(value);
+}
+
+function buildPermissionModeControlInput(state, action) {
+  if (normalizeNativeCodexCommand(state?.nativeCommand?.command) !== '/permissions') {
+    return '';
+  }
+  const targetIndex = permissionModeActionIndex(action);
+  if (!targetIndex) return '';
+  const options = extractPermissionsPickerOptions(collectNativeVisualLines(
+    state.session?.visualViewportSnapshot || state.session?.visualSnapshot
+  ));
+  if (options.length !== 3) return '';
+  const selectedIndex = options.find((option) => option.selected)?.index || 1;
+  const delta = targetIndex - selectedIndex;
+  const arrow = delta > 0 ? '\x1b[B' : '\x1b[A';
+  return `${arrow.repeat(Math.abs(delta))}\r`;
+}
+
+async function writeNativeControlInput(state, action, input) {
+  const value = String(action || '').toLowerCase();
+  if (
+    !isPermissionModeControlAction(value) ||
+    normalizeNativeCodexCommand(state?.nativeCommand?.command) !== '/permissions'
+  ) {
+    state.session.write(input);
+    return;
+  }
+
+  const targetIndex = permissionModeActionIndex(value);
+  const options = extractPermissionsPickerOptions(collectNativeVisualLines(
+    state.session?.visualViewportSnapshot || state.session?.visualSnapshot
+  ));
+  const selectedIndex = options.find((option) => option.selected)?.index || 1;
+  const delta = targetIndex - selectedIndex;
+  const arrow = delta > 0 ? '\x1b[B' : '\x1b[A';
+
+  for (let i = 0; i < Math.abs(delta); i += 1) {
+    state.session.write(arrow);
+    await delay(45);
+  }
+  await delay(80);
+  state.session.write('\r');
+}
+
+function permissionModeActionIndex(action) {
+  return {
+    permission_default: 1,
+    permission_auto_review: 2,
+    permission_full_access: 3
+  }[String(action || '').toLowerCase()] || 0;
+}
+
+function permissionModeActionLabel(action) {
+  return {
+    permission_default: 'Default',
+    permission_auto_review: 'Auto-review',
+    permission_full_access: 'Full Access'
+  }[String(action || '').toLowerCase()] || '';
+}
+
+function formatPermissionModeResultHint(mode) {
+  return {
+    Default: '保留工作区读写能力；联网或越界文件操作仍需要确认。',
+    'Auto-review': '符合条件的确认会先走自动审查，适合减少手动审批打断。',
+    'Full Access': 'Codex 可越过工作区和联网审批限制，请只在可信任务中使用。'
+  }[mode] || '权限模式已应用。';
+}
+
+function isPermissionModeControlAction(action) {
+  return Boolean(permissionModeActionIndex(action));
+}
+
 function isApprovalControlAction(action) {
   const value = String(action || '').toLowerCase();
   return [
@@ -2538,6 +4339,23 @@ function isApprovalControlAction(action) {
     'escape',
     'cancel',
     'no'
+  ].includes(value);
+}
+
+function isSubmitControlAction(action) {
+  const value = String(action || '').toLowerCase();
+  if (isPermissionModeControlAction(value)) return true;
+  return [
+    'approve',
+    'yes',
+    'approve_persistent',
+    'always',
+    'persist',
+    'deny',
+    'escape',
+    'cancel',
+    'no',
+    'enter'
   ].includes(value);
 }
 
@@ -2569,7 +4387,7 @@ function approvalPromptSignature(prompt) {
     prompt.question || '',
     prompt.reason || '',
     prompt.command || '',
-    ...(prompt.options || [])
+    ...(prompt.options || []).map(formatApprovalOptionSignature)
   ]
     .join('|')
     .replace(/\s+/g, ' ')
@@ -2590,6 +4408,190 @@ function normalizeNativeCodexCommand(command) {
   if (value === '/resume') return '/resume';
   if (value === '/status') return '/status';
   return value || '/status';
+}
+
+function isPersistentNativeSlashPage(command) {
+  const normalized = normalizeNativeCodexCommand(command);
+  return normalized === '/resume' || normalized === '/permissions';
+}
+
+function isNativePageActionConfirmed(state, pending) {
+  const command = normalizeNativeCodexCommand(pending?.command);
+  const snapshot = String(
+    state?.session?.visualViewportSnapshot ||
+      state?.session?.visualSnapshot ||
+      ''
+  );
+  if (!snapshot.trim()) return false;
+  if (isNativeSlashPageVisible(snapshot, command)) return false;
+
+  const signature = nativePageSnapshotSignature(state, command);
+  if (signature && signature !== pending.beforeSignature) return true;
+  return hasIdlePromptAfterSubmittedPrompt(snapshot, '');
+}
+
+function isNativeSlashPageVisible(snapshot, command) {
+  const normalized = normalizeNativeCodexCommand(command);
+  const lines = collectNativeVisualLines(snapshot);
+  if (lines.length === 0) return false;
+  if (normalized === '/resume') {
+    if (lines.some((line) => /^Resume a previous session$/i.test(normalizeNativeLine(line)))) {
+      return true;
+    }
+    if (extractResumeRows(lines).items.length > 0) return true;
+    if (extractPickerOptions(lines).length > 0 && /resume|session|会话/i.test(lines.join(' '))) {
+      return true;
+    }
+    return false;
+  }
+  if (normalized === '/permissions') {
+    return lines.some((line) =>
+      /^Update Model Permissions$/i.test(normalizeNativeLine(line))
+    ) || extractPermissionsPickerOptions(lines).length === 3;
+  }
+  return false;
+}
+
+function nativePageSnapshotSignature(state, command) {
+  const snapshot = String(
+    state?.session?.visualViewportSnapshot ||
+      state?.session?.visualSnapshot ||
+      ''
+  );
+  if (!snapshot.trim()) return '';
+  const normalized = normalizeNativeCodexCommand(command);
+  const lines = collectNativeVisualLines(snapshot)
+    .map((line) => normalizeNativeLine(line))
+    .filter(Boolean)
+    .filter((line) => !isNativeSlashNoiseLine(line, normalized));
+  return lines.join('\n').trim();
+}
+
+function formatNativePageActionResult(pending, state = null) {
+  const command = normalizeNativeCodexCommand(pending?.command);
+  const action = String(pending?.action || '').toLowerCase();
+  const selected = extractNativePageSelectedSummary(pending);
+  const recent = summarizePostNativePageActionSnapshot(state);
+  if (command === '/resume' && action === 'enter') {
+    const lines = [
+      '**会话已恢复**',
+      '- Codex 已离开 `/resume` 选择页，并切换到所选历史会话。'
+    ];
+    if (selected) {
+      lines.push(`- 恢复目标: \`${selected}\``);
+    }
+    lines.push(
+      '',
+      '**恢复后状态**',
+      `- 最近输出: ${recent || '暂未检测到新的可读输出。'}`,
+      '- 现在可以继续发送新的任务。'
+    );
+    return lines.join('\n');
+  }
+  if (command === '/resume' && action === 'escape') {
+    return [
+      '**已退出历史会话选择**',
+      '- Codex 已返回命令界面，没有恢复新的历史会话。',
+      `- 最近输出: ${recent || '当前没有新的可读输出。'}`,
+      '- 现在可以继续发送新的任务。'
+    ].join('\n');
+  }
+  if (command === '/permissions' && isPermissionModeControlAction(action)) {
+    const mode = permissionModeActionLabel(action);
+    return [
+      '**权限模式已更新**',
+      `- 已切换为 \`${mode}\`。`,
+      `- ${formatPermissionModeResultHint(mode)}`
+    ].join('\n');
+  }
+  if (action === 'enter') {
+    return [
+      '**选择已确认**',
+      `- Codex 已离开 \`${command}\` 页面。`
+    ].join('\n');
+  }
+  return [
+    '**页面已退出**',
+    `- Codex 已离开 \`${command}\` 页面。`
+  ].join('\n');
+}
+
+function extractNativePageSelectedSummary(pending) {
+  const command = normalizeNativeCodexCommand(pending?.command);
+  if (command !== '/resume') return '';
+  return String(pending?.beforeSignature || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => /^(?:❯|>|›)\s+/.test(line))
+    ?.replace(/^(?:❯|>|›)\s+/, '')
+    .replace(/\s+/g, ' ')
+    .trim() || '';
+}
+
+function summarizePostNativePageActionSnapshot(state) {
+  const snapshot = String(
+    state?.session?.visualViewportSnapshot ||
+      state?.session?.visualSnapshot ||
+      ''
+  );
+  if (!snapshot.trim()) return '';
+  const lines = collectNativeVisualLines(snapshot)
+    .map((line) => normalizeNativeLine(line))
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^›\s*$/.test(line))
+    .filter((line) => !/^>_\s+OpenAI Codex/i.test(line))
+    .filter((line) => !/^Tip:/i.test(line))
+    .filter((line) => !/^Use \/skills/i.test(line))
+    .filter((line) => !/^type \/help/i.test(line));
+  const value = lines.slice(-3).join(' / ').replace(/\s+/g, ' ').trim();
+  return value ? clipForLog(value, 180) : '';
+}
+
+function shouldFinishReplyStream(state, formatted) {
+  if (!formatted || isPersistentNativeSlashPage(state?.nativeCommand?.command)) {
+    return false;
+  }
+  if (normalizeNativeCodexCommand(state?.nativeCommand?.command) === '/status') {
+    return isCompleteStatusSlashOutput(formatted);
+  }
+  return true;
+}
+
+function isCompleteStatusSlashOutput(text) {
+  const value = stripRemoteCodexColorMarkers(text);
+  if (
+    /\*\*剩余用量\*\*/.test(value) &&
+    /^-\s+(?:5 小时额度|每周额度|[^:\n]*limit):/im.test(value)
+  ) {
+    return true;
+  }
+
+  if (!/\*\*运行信息\*\*/.test(value)) return false;
+  const fieldCount = [
+    /^-\s+模型:/m,
+    /^-\s+权限:/m,
+    /^-\s+目录:/m,
+    /^-\s+账号:/m,
+    /^-\s+协作模式:/m,
+    /^-\s+Agents\.md:/m,
+    /^-\s+Session:/m
+  ].filter((pattern) => pattern.test(value)).length;
+  return fieldCount >= 4;
+}
+
+function buildNativeSlashPanelActions(command) {
+  const normalized = normalizeNativeCodexCommand(command);
+  if (normalized === '/resume') {
+    return ['up', 'down', 'enter', 'escape'];
+  }
+  if (normalized === '/permissions') {
+    return ['permission_default', 'permission_auto_review', 'permission_full_access'];
+  }
+  if (normalized === '/status') {
+    return [];
+  }
+  return ['up', 'down', 'enter', 'escape'];
 }
 
 function buildNativeSlashInput(text) {
@@ -2623,10 +4625,13 @@ module.exports = {
   formatTerminalFinalAnswer,
   formatVisualSnapshot,
   formatVisualProgressSnapshot,
+  classifyVisualTurnOutput,
   formatTerminalProgress,
   formatNativeSlashOutput,
+  isCompleteStatusSlashOutput,
   parseCodexProgressState,
   renderCodexProgressState,
+  classifyTerminalColorRole,
   buildSubmitInput,
   buildControlInput,
   buildNativeSlashInput,

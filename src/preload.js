@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('codexShell', {
   pluginAction: (pluginId, action, payload) =>
     ipcRenderer.invoke('plugins:action', pluginId, action, payload),
   openRawOutputLog: () => ipcRenderer.invoke('logs:open-raw-output'),
+  getCaptureLogView: (options) => ipcRenderer.invoke('logs:capture-view', options),
+  getDebugState: () => ipcRenderer.invoke('debug:state'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   write: (data) => ipcRenderer.send('terminal:input', data),
   resize: (size) => ipcRenderer.send('terminal:resize', size),

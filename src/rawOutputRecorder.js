@@ -1,19 +1,23 @@
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const CAPTURE_SCHEMA_VERSION = 1;
 const DEFAULT_MAX_BYTES = 50 * 1024 * 1024;
 
 class RawOutputRecorder {
   constructor({ config, logger = console } = {}) {
     this.logger = logger;
     this.warned = false;
+    this.sequenceBySession = new Map();
+    this.snapshotHashBySession = new Map();
     this.updateConfig(config || {});
   }
 
   updateConfig(config = {}) {
     const rawConfig = config.remoteControl || {};
-    this.enabled = Boolean(rawConfig.rawOutputLogEnabled);
+    this.enabled = rawConfig.rawOutputLogEnabled !== false;
     this.logPath =
       rawConfig.rawOutputLogPath ||
       path.join(os.homedir(), '.local', 'state', 'remote-codex', 'raw-output.jsonl');
@@ -21,37 +25,68 @@ class RawOutputRecorder {
     this.warned = false;
   }
 
+  recordSessionStart(session) {
+    this.recordSessionEvent(session, 'session.start', {
+      command: session.command,
+      args: session.args,
+      createdAt: session.createdAt
+    });
+  }
+
   recordOutput(session, chunk) {
-    this.record('pty.output', {
-      sessionId: session.id,
+    this.recordSessionEvent(session, 'pty.output', {
       cursor: chunk.cursor,
-      cwd: session.cwd,
-      cols: session.cols,
-      rows: session.rows,
       bytes: Buffer.byteLength(String(chunk.data || ''), 'utf8'),
-      dataBase64: Buffer.from(String(chunk.data || ''), 'utf8').toString('base64'),
+      dataBase64: encodeBase64(chunk.data),
       preview: clipForLog(stripControlPreview(chunk.data), 500)
     });
   }
 
   recordInput(session, data) {
-    this.record('pty.input', {
-      sessionId: session.id,
-      cwd: session.cwd,
-      cols: session.cols,
-      rows: session.rows,
+    this.recordSessionEvent(session, 'pty.input', {
+      cursor: session.cursor,
       bytes: Buffer.byteLength(String(data || ''), 'utf8'),
-      dataBase64: Buffer.from(String(data || ''), 'utf8').toString('base64'),
+      dataBase64: encodeBase64(data),
       preview: clipForLog(stripControlPreview(data), 500)
     });
   }
 
+  recordResize(session, previous, next) {
+    this.recordSessionEvent(session, 'terminal.resize', {
+      cursor: session.cursor,
+      previous: normalizeTerminalSize(previous),
+      next: normalizeTerminalSize(next)
+    }, { terminal: normalizeTerminalSize(next) });
+  }
+
+  recordSnapshot(session, snapshot = {}) {
+    const payload = normalizeTerminalSnapshot(snapshot);
+    const hash = hashJson(payload);
+    if (this.snapshotHashBySession.get(session.id) === hash) return false;
+    this.snapshotHashBySession.set(session.id, hash);
+    this.recordSessionEvent(session, 'terminal.snapshot', {
+      cursor: session.cursor,
+      hash,
+      snapshot: payload
+    });
+    return true;
+  }
+
   recordExit(session, exit) {
-    this.record('pty.exit', {
-      sessionId: session.id,
-      cwd: session.cwd,
+    this.recordSessionEvent(session, 'pty.exit', {
+      cursor: session.cursor,
       exitCode: exit?.exitCode,
       signal: exit?.signal || null
+    });
+  }
+
+  recordSessionEvent(session, type, payload = {}, options = {}) {
+    if (!session) return;
+    this.record(type, {
+      sessionId: session.id,
+      cwd: session.cwd,
+      terminal: options.terminal || normalizeTerminalSize(session),
+      ...payload
     });
   }
 
@@ -61,9 +96,13 @@ class RawOutputRecorder {
     try {
       fs.mkdirSync(path.dirname(this.logPath), { recursive: true });
       this.rotateIfNeeded();
+      const sessionId = String(payload.sessionId || '');
+      const sequence = this.nextSequence(sessionId);
       fs.appendFileSync(
         this.logPath,
         `${JSON.stringify({
+          schemaVersion: CAPTURE_SCHEMA_VERSION,
+          sequence,
           at: new Date().toISOString(),
           type,
           ...payload
@@ -76,6 +115,13 @@ class RawOutputRecorder {
     }
   }
 
+  nextSequence(sessionId) {
+    const key = sessionId || '__global__';
+    const next = (this.sequenceBySession.get(key) || 0) + 1;
+    this.sequenceBySession.set(key, next);
+    return next;
+  }
+
   rotateIfNeeded() {
     if (!this.maxBytes || this.maxBytes <= 0) return;
     if (!fs.existsSync(this.logPath)) return;
@@ -85,6 +131,52 @@ class RawOutputRecorder {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     fs.renameSync(this.logPath, path.join(parsed.dir, `${parsed.name}.${stamp}${parsed.ext}`));
   }
+}
+
+function normalizeTerminalSnapshot(snapshot = {}) {
+  if (typeof snapshot === 'string') {
+    return {
+      scrollback: snapshot,
+      viewport: snapshot,
+      styledScrollback: null,
+      styledViewport: null
+    };
+  }
+  return {
+    scrollback: String(snapshot.scrollback || ''),
+    viewport: String(snapshot.viewport || ''),
+    styledScrollback: normalizeStyledSnapshot(snapshot.styledScrollback),
+    styledViewport: normalizeStyledSnapshot(snapshot.styledViewport)
+  };
+}
+
+function normalizeStyledSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object' || !Array.isArray(snapshot.lines)) {
+    return null;
+  }
+  return {
+    lines: snapshot.lines.map((line) => ({
+      text: String(line?.text || ''),
+      firstChar: String(line?.firstChar || ''),
+      firstStyle: line?.firstStyle || null,
+      bulletStyle: line?.bulletStyle || null
+    }))
+  };
+}
+
+function normalizeTerminalSize(size = {}) {
+  return {
+    cols: Math.max(2, Number(size.cols) || 120),
+    rows: Math.max(2, Number(size.rows) || 34)
+  };
+}
+
+function hashJson(value) {
+  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function encodeBase64(data) {
+  return Buffer.from(String(data || ''), 'utf8').toString('base64');
 }
 
 function stripControlPreview(data) {
@@ -103,5 +195,9 @@ function clipForLog(text, max) {
 }
 
 module.exports = {
-  RawOutputRecorder
+  CAPTURE_SCHEMA_VERSION,
+  DEFAULT_MAX_BYTES,
+  RawOutputRecorder,
+  hashJson,
+  normalizeTerminalSnapshot
 };

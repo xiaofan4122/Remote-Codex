@@ -47,6 +47,7 @@ class CodexSession extends EventEmitter {
         COLORTERM: 'truecolor'
       }
     });
+    this.outputRecorder?.recordSessionStart(this);
 
     this.shell.onData((data) => {
       const chunk = {
@@ -85,9 +86,18 @@ class CodexSession extends EventEmitter {
     const nextCols = Math.max(2, Number(cols) || this.cols);
     const nextRows = Math.max(2, Number(rows) || this.rows);
     if (nextCols === this.cols && nextRows === this.rows) return;
+    const previous = { cols: this.cols, rows: this.rows };
     this.cols = nextCols;
     this.rows = nextRows;
+    this.outputRecorder?.recordResize(this, previous, {
+      cols: nextCols,
+      rows: nextRows
+    });
     this.shell.resize(nextCols, nextRows);
+  }
+
+  recordSnapshot(snapshot) {
+    return this.outputRecorder?.recordSnapshot(this, snapshot) || false;
   }
 
   readAfter(cursor = 0) {

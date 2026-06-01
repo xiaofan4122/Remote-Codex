@@ -23,6 +23,7 @@
       <div class="actions">
         <button id="chooseDir" type="button" data-i18n="openProject">打开项目</button>
         <button id="restart" type="button" data-i18n="restartCodex">重启 Codex</button>
+        <button id="captureLogs" type="button" data-i18n="captureLogs">采集日志</button>
         <button id="settings" type="button" data-i18n="settings">设置</button>
       </div>
     </header>
@@ -53,6 +54,10 @@
                 <option value="en" data-i18n="languageEnglish">English</option>
               </select>
             </label>
+            <div class="check-row">
+              <input id="debugPanelEnabled" name="debugPanelEnabled" type="checkbox" />
+              <label for="debugPanelEnabled" data-i18n="debugPanelEnabled">显示状态调试面板</label>
+            </div>
           </section>
 
           <section class="settings-section">
@@ -83,6 +88,7 @@
               <img id="feishuConnectQr" alt="" hidden />
               <p id="feishuConnectLink"></p>
             </div>
+            <p class="settings-help" data-i18n="feishuBotMenuHint"></p>
           </section>
         </div>
 
@@ -93,6 +99,66 @@
           </div>
         </footer>
       </form>
+    </aside>
+
+    <aside id="captureLogPanel" class="capture-log-panel" aria-hidden="true">
+      <section class="capture-log-dialog">
+        <header class="capture-log-header">
+          <div>
+            <h2 data-i18n="captureLogs">采集日志</h2>
+            <p id="captureLogPath"></p>
+          </div>
+          <div class="capture-log-header-actions">
+            <button id="refreshCaptureLogs" type="button" data-i18n="refresh">刷新</button>
+            <button id="openCaptureLogFile" type="button" data-i18n="openRawFile">打开原始文件</button>
+            <button id="closeCaptureLogs" type="button" data-i18n="close">关闭</button>
+          </div>
+        </header>
+        <div class="capture-log-toolbar">
+          <label>
+            <span data-i18n="session">会话</span>
+            <select id="captureLogSession"></select>
+          </label>
+          <label>
+            <span data-i18n="eventType">事件类型</span>
+            <select id="captureLogType"></select>
+          </label>
+          <label class="capture-log-auto-refresh">
+            <input id="captureLogAutoRefresh" type="checkbox" checked />
+            <span data-i18n="autoRefresh">自动刷新</span>
+          </label>
+          <label class="capture-log-auto-refresh">
+            <input id="captureLogIncludeNoise" type="checkbox" />
+            <span data-i18n="includeTerminalControls">显示终端控制事件</span>
+          </label>
+          <span id="captureLogStatus" role="status"></span>
+        </div>
+        <div id="captureLogStats" class="capture-log-stats"></div>
+        <div class="capture-log-body">
+          <ol id="captureLogEvents" class="capture-log-events"></ol>
+          <section class="capture-log-detail">
+            <header>
+              <h3 id="captureLogDetailTitle" data-i18n="selectEvent">选择事件查看详情</h3>
+              <div class="capture-log-tabs">
+                <button class="is-active" id="captureLogContentTab" type="button" data-i18n="content">内容</button>
+                <button id="captureLogMetadataTab" type="button" data-i18n="metadata">元数据</button>
+              </div>
+            </header>
+            <pre id="captureLogDetail"></pre>
+          </section>
+        </div>
+      </section>
+    </aside>
+
+    <aside id="debugPanel" class="debug-panel" aria-hidden="true">
+      <header>
+        <div>
+          <h2 data-i18n="debugPanel">状态调试</h2>
+          <p id="debugPanelUpdated">--</p>
+        </div>
+        <button id="closeDebugPanel" type="button" data-i18n="close">关闭</button>
+      </header>
+      <div id="debugPanelBody" class="debug-panel-body"></div>
     </aside>
 
     <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>

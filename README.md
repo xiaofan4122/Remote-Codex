@@ -140,9 +140,16 @@ The easiest setup path is:
 2. Click `Connect Feishu`.
 3. Scan or open the Feishu authorization link.
 4. Add the created bot to the target chat.
+5. In the Feishu Developer Console, publish a floating bot menu with:
+   `状态 /status`, `历史会话 /resume`, and `权限模式 /permission`.
 
 After authorization, the app stores the returned App ID/App Secret, enables
 long connection mode, and adds the authorizing user's Open ID to the allowlist.
+The bot menu must currently be configured in the Feishu Developer Console.
+The documented public APIs and current official SDK do not expose a supported
+endpoint that Remote Codex can use to publish these direct-chat menu actions.
+See
+https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot.
 
 The Electron window shows the native Codex TUI, so slash commands, approvals,
 keyboard shortcuts, model switching, and other TUI behavior continue to come
@@ -175,20 +182,42 @@ default. Use `npm run corpus:cleaning` to extract historical log samples and
 `npm run corpus:replay -- /path/to/corpus.jsonl` to replay the current cleaning
 rules against captured raw/snapshot output.
 
-For temporary full PTY logging during parser work, enable the raw output log:
+Remote Codex records a bounded local terminal capture by default:
 
 ```bash
-REMOTE_CODEX_RAW_OUTPUT_LOG=1 remote-codex
+~/.local/state/remote-codex/raw-output.jsonl
 ```
 
-Raw events are written to `~/.local/state/remote-codex/raw-output.jsonl` by
-default. The JSONL stores input/output/exit events, session metadata, a readable
-preview, and base64-encoded PTY bytes. Use
-`npm run rawlog:replay -- /path/to/raw-output.jsonl` to replay the current text
-parser against long-running captures. This can contain prompts, command output,
-and file contents, so keep it disabled unless you are collecting parser samples.
-The same raw output log can be enabled from Settings with the checkbox next to
-`Open Log`.
+The versioned JSONL event stream stores session starts, complete PTY input and
+output bytes, terminal resize events, deduplicated visual/styled snapshots, and
+session exits. It rotates at `50MB` by default. The local file can contain
+prompts, command output, and file contents. Disable it from Settings or set
+`REMOTE_CODEX_RAW_OUTPUT_LOG=0` when local capture is not appropriate.
+
+Replay and verify a capture:
+
+```bash
+npm run capture:replay -- /path/to/raw-output.jsonl
+```
+
+Export a redacted fixture before sharing a capture or committing a parser
+sample:
+
+```bash
+npm run capture:export-fixture -- /path/to/raw-output.jsonl /tmp/capture.fixture.jsonl
+```
+
+The older parser-oriented summary command remains available:
+
+```bash
+npm run rawlog:replay -- /path/to/raw-output.jsonl
+```
+
+The Electron toolbar also includes `Capture Logs`. It opens a structured local
+viewer with session and event-type filters, event counts, a sequence-ordered
+timeline, and content/metadata inspection for PTY bytes, resize events, and
+visual snapshots. The viewer reads the same JSONL fact stream used by replay;
+it does not maintain a separate parser.
 If Codex opens an approval prompt in visual terminal mode, the streaming card
 switches to a waiting-for-confirmation view with the command, reason, and
 visible options. Use the card buttons or send `/approve`, `/always`, or

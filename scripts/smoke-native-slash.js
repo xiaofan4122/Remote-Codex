@@ -3,8 +3,14 @@
 const { Terminal } = require('@xterm/xterm');
 const { loadConfig } = require('../src/config');
 const { CodexSessionManager } = require('../src/codexSessionManager');
+const { RawOutputRecorder } = require('../src/rawOutputRecorder');
+const {
+  readTerminalScrollback,
+  readTerminalViewport
+} = require('../src/terminalCaptureReplay');
 const {
   buildNativeSlashInput,
+  isCompleteStatusSlashOutput,
   formatNativeSlashOutput,
   writeNativeSlashCommand
 } = require('../src/remoteSessionController');
@@ -14,11 +20,19 @@ const timeoutMs = Number(process.env.REMOTE_CODEX_NATIVE_SLASH_TIMEOUT_MS) || 30
 const cwd = process.env.REMOTE_CODEX_NATIVE_SLASH_CWD || process.cwd();
 const cols = Number(process.env.REMOTE_CODEX_NATIVE_SLASH_COLS) || 120;
 const rows = Number(process.env.REMOTE_CODEX_NATIVE_SLASH_ROWS) || 34;
+const capturePath = process.env.REMOTE_CODEX_NATIVE_SLASH_CAPTURE_PATH || '';
 
 async function main() {
   const config = loadConfig();
   config.codex.defaultCwd = cwd;
-  const manager = new CodexSessionManager({ config });
+  if (capturePath) {
+    config.remoteControl.rawOutputLogEnabled = true;
+    config.remoteControl.rawOutputLogPath = capturePath;
+  }
+  const outputRecorder = capturePath
+    ? new RawOutputRecorder({ config })
+    : null;
+  const manager = new CodexSessionManager({ config, outputRecorder });
   const session = manager.create({ cwd, cols, rows });
   const terminal = new Terminal({ cols, rows, scrollback: 1000 });
   let lastDataAt = Date.now();
@@ -32,12 +46,20 @@ async function main() {
     await waitForReady(terminal, () => lastDataAt, timeoutMs);
     await writeNativeSlashCommand(session, command);
     await waitForNativeOutput(terminal, command, timeoutMs);
-    const snapshot = readViewport(terminal, rows);
+    const snapshot = readTerminalViewport(terminal);
+    session.recordSnapshot({
+      scrollback: readTerminalScrollback(terminal),
+      viewport: snapshot
+    });
     const formatted = formatNativeSlashOutput({ snapshot, command });
     console.log('--- viewport ---');
     console.log(snapshot);
     console.log('--- formatted ---');
     console.log(formatted || '(empty)');
+    if (capturePath) {
+      console.log('--- capture ---');
+      console.log(capturePath);
+    }
     if (!formatted) {
       process.exitCode = 2;
     }
@@ -48,11 +70,17 @@ async function main() {
 
 function waitForReady(terminal, getLastDataAt, timeout) {
   const started = Date.now();
+  let stableReadyChecks = 0;
   return new Promise((resolve, reject) => {
     const timer = setInterval(() => {
-      const snapshot = readViewport(terminal, rows);
+      const snapshot = readTerminalViewport(terminal);
       const idleFor = Date.now() - getLastDataAt();
-      if (/›/.test(snapshot) && !/Booting MCP server/i.test(snapshot) && idleFor >= 500) {
+      if (isCodexReadySnapshot(snapshot) && idleFor >= 500) {
+        stableReadyChecks += 1;
+      } else {
+        stableReadyChecks = 0;
+      }
+      if (stableReadyChecks >= 2) {
         clearInterval(timer);
         resolve();
         return;
@@ -61,7 +89,7 @@ function waitForReady(terminal, getLastDataAt, timeout) {
         clearInterval(timer);
         reject(
           new Error(
-            `Timed out waiting for Codex prompt to become ready.\n${readViewport(terminal, rows)}`
+            `Timed out waiting for Codex prompt to become ready.\n${readTerminalViewport(terminal)}`
           )
         );
       }
@@ -69,11 +97,17 @@ function waitForReady(terminal, getLastDataAt, timeout) {
   });
 }
 
+function isCodexReadySnapshot(snapshot) {
+  const text = String(snapshot || '');
+  return /›/.test(text) &&
+    !/(?:Booting MCP server|MCP startup|Starting MCP|Loading)/i.test(text);
+}
+
 function waitForNativeOutput(terminal, slashCommand, timeout) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
     const timer = setInterval(() => {
-      const snapshot = readViewport(terminal, rows);
+      const snapshot = readTerminalViewport(terminal);
       const formatted = formatNativeSlashOutput({ snapshot, command: slashCommand });
       if (isNativeSlashSmokeReady(snapshot, formatted, slashCommand)) {
         clearInterval(timer);
@@ -84,7 +118,7 @@ function waitForNativeOutput(terminal, slashCommand, timeout) {
         clearInterval(timer);
         reject(
           new Error(
-            `Timed out waiting for ${slashCommand} output.\n${readViewport(terminal, rows)}`
+            `Timed out waiting for ${slashCommand} output.\n${readTerminalViewport(terminal)}`
           )
         );
       }
@@ -93,27 +127,20 @@ function waitForNativeOutput(terminal, slashCommand, timeout) {
 }
 
 function isNativeSlashSmokeReady(snapshot, formatted, slashCommand) {
-  if (!formatted || /Codex 正在处理/.test(formatted)) return false;
-  if (slashCommand === '/status' && /Model:|Session:|Permissions:/i.test(formatted)) {
-    return true;
+  if (!formatted || /(?:Codex 正在处理|Working \(\d+s\))/.test(formatted)) {
+    return false;
+  }
+  if (slashCommand === '/status') {
+    return isCompleteStatusSlashOutput(formatted);
+  }
+  if (slashCommand === '/permissions') {
+    return /1\. Default\b/.test(formatted) &&
+      /2\. Auto-review\b/.test(formatted) &&
+      /3\. Full Access\b/.test(formatted);
   }
   if (snapshot.includes(`› ${slashCommand}`)) return false;
   if (/OpenAI Codex|directory:|Start a fresh idea/i.test(formatted)) return false;
   return true;
-}
-
-function readViewport(terminal, rowCount) {
-  const buffer = terminal.buffer.active;
-  const lines = [];
-  const start = Math.max(0, buffer.viewportY);
-  const end = Math.min(buffer.length, start + rowCount);
-
-  for (let index = start; index < end; index += 1) {
-    const line = buffer.getLine(index);
-    if (line) lines.push(line.translateToString(true));
-  }
-
-  return lines.join('\n');
 }
 
 main().catch((error) => {

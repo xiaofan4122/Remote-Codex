@@ -4,7 +4,8 @@ const path = require('node:path');
 
 const defaultConfig = {
   ui: {
-    language: 'zh-CN'
+    language: 'zh-CN',
+    debugPanelEnabled: false
   },
   codex: {
     command: 'codex',
@@ -29,7 +30,7 @@ const defaultConfig = {
     responseSource: 'visual_terminal',
     captureCleaningCorpus: false,
     cleaningCorpusPath: '',
-    rawOutputLogEnabled: false,
+    rawOutputLogEnabled: true,
     rawOutputLogPath: '',
     rawOutputLogMaxBytes: 52428800,
     flushIntervalMs: 250,
@@ -125,7 +126,8 @@ function parseList(value) {
 function getEnvConfig() {
   return {
     ui: {
-      language: process.env.REMOTE_CODEX_LANGUAGE || process.env.CODEX_UI_LANGUAGE
+      language: process.env.REMOTE_CODEX_LANGUAGE || process.env.CODEX_UI_LANGUAGE,
+      debugPanelEnabled: parseBoolean(process.env.REMOTE_CODEX_DEBUG_PANEL)
     },
     codex: {
       command: process.env.CODEX_COMMAND,

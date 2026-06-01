@@ -10,6 +10,7 @@ const { PluginManager } = require('./plugins/pluginManager');
 const { FeishuRegistrationManager } = require('./plugins/feishu/registrationManager');
 const { createLogger } = require('./logger');
 const { RawOutputRecorder } = require('./rawOutputRecorder');
+const { readCaptureView } = require('./terminalCaptureViewer');
 const { parseLaunchOptions, buildCodexArgs } = require('./launchOptions');
 
 let mainWindow;
@@ -290,6 +291,23 @@ app.whenReady().then(() => {
     return { ok: true, path: logPath, openedFile: !error };
   });
 
+  ipcMain.handle('logs:capture-view', (_event, options) => {
+    return readCaptureView(rawOutputRecorder.logPath, options);
+  });
+
+  ipcMain.handle('debug:state', () => {
+    return remoteController?.buildDebugState(currentSession) || {
+      at: new Date().toISOString(),
+      phase: currentSession ? 'idle' : 'detached',
+      busy: false,
+      hasRemoteState: false,
+      remote: null,
+      session: currentSession?.status?.() || null,
+      detection: {},
+      text: {}
+    };
+  });
+
   ipcMain.handle('feishu:connect-start', async (_event, nextConfig) => {
     if (nextConfig && typeof nextConfig === 'object') {
       config = saveConfig(nextConfig);
@@ -333,13 +351,22 @@ app.whenReady().then(() => {
 
   ipcMain.on('terminal:snapshot', (_event, text) => {
     if (!currentSession) return;
+    currentSession.recordSnapshot(text);
     if (text && typeof text === 'object') {
       currentSession.visualSnapshot = String(text.scrollback || '');
       currentSession.visualViewportSnapshot = String(text.viewport || '');
+      currentSession.visualStyledSnapshot = normalizeStyledSnapshot(
+        text.styledScrollback
+      );
+      currentSession.visualStyledViewportSnapshot = normalizeStyledSnapshot(
+        text.styledViewport
+      );
       return;
     }
     currentSession.visualSnapshot = String(text || '');
     currentSession.visualViewportSnapshot = String(text || '');
+    currentSession.visualStyledSnapshot = null;
+    currentSession.visualStyledViewportSnapshot = null;
   });
 
   mainWindow.webContents.once('did-finish-load', () => {
@@ -413,4 +440,50 @@ function runVisualSmokeTestIfRequested() {
 function mainText(key) {
   const language = config.ui?.language === 'en' ? 'en' : 'zh-CN';
   return MAIN_I18N[language]?.[key] || MAIN_I18N.en[key] || key;
+}
+
+function normalizeStyledSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object' || !Array.isArray(snapshot.lines)) {
+    return null;
+  }
+
+  const lines = snapshot.lines
+    .map(normalizeStyledSnapshotLine)
+    .filter((line) => line && line.text.trim());
+
+  return lines.length > 0 ? { lines } : null;
+}
+
+function normalizeStyledSnapshotLine(line) {
+  if (!line || typeof line !== 'object') return null;
+  return {
+    text: String(line.text || '').trimEnd(),
+    firstChar: String(line.firstChar || '').slice(0, 8),
+    firstStyle: normalizeTerminalCellStyle(line.firstStyle),
+    bulletStyle: normalizeTerminalCellStyle(line.bulletStyle)
+  };
+}
+
+function normalizeTerminalCellStyle(style) {
+  if (!style || typeof style !== 'object') return null;
+  const fgMode = normalizeTerminalColorMode(style.fgMode);
+  const bgMode = normalizeTerminalColorMode(style.bgMode);
+  return {
+    fgMode,
+    fg: normalizeColorNumber(style.fg),
+    bgMode,
+    bg: normalizeColorNumber(style.bg),
+    bold: Boolean(style.bold),
+    dim: Boolean(style.dim),
+    italic: Boolean(style.italic)
+  };
+}
+
+function normalizeTerminalColorMode(mode) {
+  return mode === 'rgb' || mode === 'palette' ? mode : 'default';
+}
+
+function normalizeColorNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
 }
