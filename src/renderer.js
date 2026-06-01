@@ -6,12 +6,14 @@ const chooseDirButton = document.getElementById('chooseDir');
 const restartButton = document.getElementById('restart');
 const settingsButton = document.getElementById('settings');
 const captureLogsButton = document.getElementById('captureLogs');
+const toggleDebugPanelButton = document.getElementById('toggleDebugPanel');
 const settingsPanel = document.getElementById('settingsPanel');
 const settingsForm = document.getElementById('settingsForm');
 const closeSettingsButton = document.getElementById('closeSettings');
 const languageSelect = document.getElementById('uiLanguage');
 const debugPanelCheckbox = document.getElementById('debugPanelEnabled');
 const rawOutputLogCheckbox = document.getElementById('rawOutputLogEnabled');
+const rawOutputLogControlsCheckbox = document.getElementById('rawOutputLogRecordTerminalControls');
 const openRawOutputLogButton = document.getElementById('openRawOutputLog');
 const connectFeishuButton = document.getElementById('connectFeishu');
 const cancelFeishuConnectButton = document.getElementById('cancelFeishuConnect');
@@ -76,6 +78,7 @@ const I18N = {
     terminalScrollback: '终端滚动历史',
     defaultWorkingDirectory: '默认工作目录',
     rawOutputLogEnabled: '记录 Codex 原始输出',
+    rawOutputLogRecordTerminalControls: '记录终端控制事件',
     openLog: '打开日志',
     rawOutputLogOpened: '日志已打开。',
     rawOutputLogOpenFailed: '打开日志失败。',
@@ -138,6 +141,7 @@ const I18N = {
     terminalScrollback: 'Terminal scrollback',
     defaultWorkingDirectory: 'Default working directory',
     rawOutputLogEnabled: 'Record raw Codex output',
+    rawOutputLogRecordTerminalControls: 'Record terminal control events',
     openLog: 'Open Log',
     rawOutputLogOpened: 'Log opened.',
     rawOutputLogOpenFailed: 'Failed to open log.',
@@ -336,8 +340,15 @@ term.onScroll(() => updateTerminalScrollbar());
 terminalScrollbar.addEventListener('scroll', () => {
   if (scrollbarSyncing) return;
   const rowHeight = getTerminalRowHeight();
-  const targetLine = Math.round(terminalScrollbar.scrollTop / rowHeight);
+  const buffer = term.buffer.active;
+  const maxLine = Math.max(0, buffer.length - term.rows);
+  const targetLine = Math.min(
+    maxLine,
+    Math.max(0, Math.round(terminalScrollbar.scrollTop / rowHeight))
+  );
   term.scrollToLine(targetLine);
+  term.refresh(0, Math.max(0, term.rows - 1));
+  scheduleTerminalSnapshot();
 });
 
 function scheduleTerminalSnapshot() {
@@ -363,14 +374,15 @@ function updateTerminalScrollbar() {
     const rowHeight = getTerminalRowHeight();
     const buffer = term.buffer.active;
     const scrollableRows = Math.max(0, buffer.length - term.rows);
+    const maxScrollTop = scrollableRows * rowHeight;
     const spacerHeight = Math.max(
       terminalScrollbar.clientHeight,
-      (scrollableRows + term.rows) * rowHeight
+      terminalScrollbar.clientHeight + maxScrollTop
     );
 
     terminalScrollSpacer.style.height = `${spacerHeight}px`;
     const nextScrollTop = Math.min(
-      scrollableRows * rowHeight,
+      maxScrollTop,
       buffer.viewportY * rowHeight
     );
 
@@ -583,6 +595,10 @@ captureLogPanel.addEventListener('click', (event) => {
   }
 });
 
+toggleDebugPanelButton.addEventListener('click', async () => {
+  await setDebugPanelEnabled(debugPanel.getAttribute('aria-hidden') === 'true');
+});
+
 refreshCaptureLogsButton.addEventListener('click', loadCaptureLogView);
 
 openCaptureLogFileButton.addEventListener('click', async () => {
@@ -684,16 +700,7 @@ openRawOutputLogButton.addEventListener('click', async () => {
 });
 
 closeDebugPanelButton.addEventListener('click', async () => {
-  if (!currentConfig) {
-    currentConfig = await window.codexShell.getConfig();
-  }
-  const nextConfig = structuredClone(currentConfig);
-  nextConfig.ui = nextConfig.ui || {};
-  nextConfig.ui.debugPanelEnabled = false;
-  const result = await window.codexShell.saveConfig(nextConfig);
-  currentConfig = result.config;
-  populateSettings(currentConfig);
-  syncDebugPanel(currentConfig);
+  await setDebugPanelEnabled(false);
 });
 
 window.addEventListener('resize', requestFit);
@@ -742,6 +749,9 @@ function populateSettings(config) {
   debugPanelCheckbox.checked = Boolean(config.ui?.debugPanelEnabled);
   setValue('codexDefaultCwd', config.codex?.defaultCwd || '');
   rawOutputLogCheckbox.checked = Boolean(config.remoteControl?.rawOutputLogEnabled);
+  rawOutputLogControlsCheckbox.checked = Boolean(
+    config.remoteControl?.rawOutputLogRecordTerminalControls
+  );
   renderFeishuConfiguredState(config);
 }
 
@@ -768,6 +778,7 @@ function collectSettings(baseConfig) {
   next.ui.debugPanelEnabled = debugPanelCheckbox.checked;
   next.codex.defaultCwd = getValue('codexDefaultCwd');
   next.remoteControl.rawOutputLogEnabled = rawOutputLogCheckbox.checked;
+  next.remoteControl.rawOutputLogRecordTerminalControls = rawOutputLogControlsCheckbox.checked;
 
   const feishu = next.plugins.feishu;
   next.remoteControl.autoCreateSession = true;
@@ -794,12 +805,27 @@ function setSettingsStatus(message) {
 function syncDebugPanel(config = currentConfig) {
   const enabled = Boolean(config?.ui?.debugPanelEnabled);
   debugPanel.setAttribute('aria-hidden', enabled ? 'false' : 'true');
+  toggleDebugPanelButton.classList.toggle('is-active', enabled);
+  toggleDebugPanelButton.setAttribute('aria-pressed', enabled ? 'true' : 'false');
   if (enabled) {
     refreshDebugPanel();
     scheduleDebugPanelRefresh();
   } else {
     clearDebugPanelRefresh();
   }
+}
+
+async function setDebugPanelEnabled(enabled) {
+  if (!currentConfig) {
+    currentConfig = await window.codexShell.getConfig();
+  }
+  const nextConfig = structuredClone(currentConfig);
+  nextConfig.ui = nextConfig.ui || {};
+  nextConfig.ui.debugPanelEnabled = Boolean(enabled);
+  const result = await window.codexShell.saveConfig(nextConfig);
+  currentConfig = result.config;
+  populateSettings(currentConfig);
+  syncDebugPanel(currentConfig);
 }
 
 function scheduleDebugPanelRefresh() {

@@ -7,6 +7,7 @@ const { PluginManager } = require('./plugins/pluginManager');
 const { FeishuRegistrationManager } = require('./plugins/feishu/registrationManager');
 const { createLogger } = require('./logger');
 const { RawOutputRecorder } = require('./rawOutputRecorder');
+const { buildResumeHint } = require('./resumeHint');
 
 let config = loadConfig();
 const host = config.api.host;
@@ -292,9 +293,19 @@ pluginManager.startEnabled().catch((error) => {
 });
 
 let shuttingDown = false;
-async function shutdown() {
+async function shutdown(signal = '') {
   if (shuttingDown) return;
   shuttingDown = true;
+  if (signal) {
+    const sessions = manager.list();
+    const lastSession = sessions[sessions.length - 1];
+    console.error(buildResumeHint({
+      command: 'remote-codex-api',
+      cwd: lastSession?.cwd || config.codex.defaultCwd,
+      session: lastSession,
+      reason: signal
+    }));
+  }
   await pluginManager.stopAll().catch((error) => {
     console.error('Failed to stop plugins:', error);
     logger.error('Failed to stop plugins', { error: error.message });
@@ -303,5 +314,5 @@ async function shutdown() {
   server.close(() => process.exit(0));
 }
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

@@ -6,6 +6,8 @@ const feishuPlugin = require('../src/plugins/feishu');
 
 async function main() {
   await testHistoricalMessagesAreIgnoredAfterStartup();
+  await testAcceptedFeishuMessageGetsAckReaction();
+  await testAcceptedFeishuMessageGetsDoneReactionAfterDispatch();
   await testStartupNotice();
   await testStopInterruptsWithoutClosingSession();
   await testStaleBusyStateDoesNotBlockNewInput();
@@ -50,6 +52,68 @@ async function testHistoricalMessagesAreIgnoredAfterStartup() {
   await wait(0);
 
   assert.deepEqual(accepted, ['/resume']);
+}
+
+async function testAcceptedFeishuMessageGetsAckReaction() {
+  const accepted = [];
+  const reactions = [];
+  const plugin = createFeishuPlugin({
+    remoteController: {
+      async handleMessage(message) {
+        accepted.push(message.text);
+      }
+    }
+  }, {
+    ackReactionEnabled: true,
+    ackReactionEmoji: 'done'
+  });
+  plugin.addMessageReaction = async (reaction) => {
+    reactions.push(reaction);
+  };
+
+  await plugin.handleReceiveMessage(feishuMessage('/status', '2000000001000', 'om_ack'));
+  await wait(0);
+
+  assert.deepEqual(accepted, ['/status']);
+  assert.deepEqual(reactions, [
+    {
+      messageId: 'om_ack',
+      emojiType: 'DONE'
+    }
+  ]);
+}
+
+async function testAcceptedFeishuMessageGetsDoneReactionAfterDispatch() {
+  const reactions = [];
+  const plugin = createFeishuPlugin({
+    remoteController: {
+      async handleMessage(message) {
+        await message.onTurnFinished();
+      }
+    }
+  }, {
+    ackReactionEnabled: true,
+    ackReactionEmoji: 'hourglass',
+    doneReactionEnabled: true,
+    doneReactionEmoji: 'done'
+  });
+  plugin.addMessageReaction = async (reaction) => {
+    reactions.push(reaction);
+  };
+
+  await plugin.handleReceiveMessage(feishuMessage('/status', '2000000001000', 'om_done'));
+  await wait(0);
+
+  assert.deepEqual(reactions, [
+    {
+      messageId: 'om_done',
+      emojiType: 'HOURGLASS'
+    },
+    {
+      messageId: 'om_done',
+      emojiType: 'DONE'
+    }
+  ]);
 }
 
 async function testStartupNotice() {
@@ -946,14 +1010,16 @@ function statusSnapshot(limit = '[████░░░░] 50% left (resets 12:
   ].join('\n');
 }
 
-function createFeishuPlugin(services = {}) {
+function createFeishuPlugin(services = {}, pluginConfig = {}) {
   return feishuPlugin.create({
     config: {},
     pluginConfig: {
       mode: 'long_connection',
       streaming: true,
+      ackReactionEnabled: false,
       appId: 'app',
-      appSecret: 'secret'
+      appSecret: 'secret',
+      ...pluginConfig
     },
     services,
     logger: {

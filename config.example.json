@@ -9,11 +9,16 @@
     "responseSource": "visual_terminal",
     "rawOutputLogEnabled": false,
     "rawOutputLogPath": "",
-    "rawOutputLogMaxBytes": 52428800
+    "rawOutputLogMaxBytes": 52428800,
+    "rawOutputLogRecordTerminalControls": false
   },
   "plugins": {
     "feishu": {
-      "enabled": false
+      "enabled": false,
+      "ackReactionEnabled": true,
+      "ackReactionEmoji": "OK",
+      "doneReactionEnabled": true,
+      "doneReactionEmoji": "DONE"
     }
   }
 }

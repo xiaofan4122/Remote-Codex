@@ -24,6 +24,7 @@
         <button id="chooseDir" type="button" data-i18n="openProject">打开项目</button>
         <button id="restart" type="button" data-i18n="restartCodex">重启 Codex</button>
         <button id="captureLogs" type="button" data-i18n="captureLogs">采集日志</button>
+        <button id="toggleDebugPanel" type="button" data-i18n="debugPanel">状态调试</button>
         <button id="settings" type="button" data-i18n="settings">设置</button>
       </div>
     </header>
@@ -70,6 +71,10 @@
               <input id="rawOutputLogEnabled" name="rawOutputLogEnabled" type="checkbox" />
               <label for="rawOutputLogEnabled" data-i18n="rawOutputLogEnabled">记录 Codex 原始输出</label>
               <button id="openRawOutputLog" type="button" data-i18n="openLog">打开日志</button>
+            </div>
+            <div class="check-row">
+              <input id="rawOutputLogRecordTerminalControls" name="rawOutputLogRecordTerminalControls" type="checkbox" />
+              <label for="rawOutputLogRecordTerminalControls" data-i18n="rawOutputLogRecordTerminalControls">记录终端控制事件</label>
             </div>
           </section>
 

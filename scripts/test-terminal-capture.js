@@ -21,7 +21,9 @@ const {
 
 async function main() {
   await testRecorderTimelineAndSnapshotDedupe();
+  testRecorderSkipsTerminalControlsByDefault();
   await testReplayAndSequenceValidation();
+  await testReplayFramesAndInputContext();
   testLegacyAndDamagedLogCompatibility();
   testFixtureExportRedactsSecrets();
   testRotation();
@@ -88,6 +90,41 @@ async function testReplayAndSequenceValidation() {
   assert.equal(replay.errors[0].error, 'missing_sequence');
 }
 
+async function testReplayFramesAndInputContext() {
+  const events = [
+    captureEvent(1, 'session.start'),
+    captureEvent(2, 'pty.input', { dataBase64: base64('explain bug\r') }),
+    captureEvent(3, 'pty.output', { dataBase64: base64('answer line\r\n') }),
+    captureEvent(4, 'terminal.resize', {
+      previous: { cols: 20, rows: 4 },
+      next: { cols: 30, rows: 5 }
+    }),
+    captureEvent(5, 'terminal.snapshot', {
+      snapshot: {
+        viewport: 'answer line',
+        scrollback: 'answer line'
+      }
+    })
+  ];
+  const snapshotReplay = await replayCaptureEvents(events, { collectFrames: true });
+  assert.deepEqual(
+    snapshotReplay.frames.map((frame) => frame.eventType),
+    ['terminal.snapshot']
+  );
+  assert.equal(snapshotReplay.frames[0].lastInputText, 'explain bug');
+  assert.deepEqual(snapshotReplay.frames[0].terminal, { cols: 30, rows: 5 });
+
+  const fullReplay = await replayCaptureEvents(events, {
+    collectFrames: true,
+    frameMode: 'all',
+    verifySnapshots: false
+  });
+  assert.deepEqual(
+    fullReplay.frames.map((frame) => frame.eventType),
+    ['pty.input', 'pty.output', 'terminal.resize', 'terminal.snapshot']
+  );
+}
+
 function testLegacyAndDamagedLogCompatibility() {
   const dir = tempDir();
   const logPath = path.join(dir, 'legacy.jsonl');
@@ -140,6 +177,30 @@ function testRotation() {
   );
 }
 
+function testRecorderSkipsTerminalControlsByDefault() {
+  const dir = tempDir();
+  const logPath = path.join(dir, 'capture.jsonl');
+  const recorder = createRecorder(logPath, { recordTerminalControls: false });
+  const session = fakeSession();
+  recorder.recordSessionStart(session);
+  recorder.recordInput(session, '\x1b[A');
+  recorder.recordOutput(session, { cursor: 1, data: '\x1b[?2026h\x1b[9;2H\x1b[K' });
+  recorder.recordOutput(session, { cursor: 2, data: 'ok\r\n' });
+  recorder.recordResize(session, { cols: 80, rows: 24 }, { cols: 100, rows: 30 });
+  recorder.recordExit(session, { exitCode: 0 });
+
+  const loaded = loadCaptureEvents(logPath);
+  assert.deepEqual(
+    loaded.events.map((event) => event.type),
+    ['session.start', 'pty.output', 'pty.exit']
+  );
+  assert.deepEqual(
+    loaded.events.map((event) => event.sequence),
+    [1, 2, 3]
+  );
+  assert.equal(Buffer.from(loaded.events[1].dataBase64, 'base64').toString('utf8'), 'ok\r\n');
+}
+
 function testCaptureViewerModel() {
   const dir = tempDir();
   const missing = readCaptureView(path.join(dir, 'missing.jsonl'));
@@ -188,7 +249,7 @@ function testCaptureViewerModel() {
     dataBase64: base64('ps'),
     bytes: 2
   }))}`);
-  assert.equal(readCaptureView(logPath, { limit: 10 }).hiddenNoiseEvents, 2);
+  assert.equal(readCaptureView(logPath, { limit: 10 }).hiddenNoiseEvents, 1);
 
   fs.appendFileSync(logPath, `\n${JSON.stringify(captureEvent(6, 'pty.input', {
     dataBase64: base64('\x1b[?1;2c'),
@@ -197,16 +258,17 @@ function testCaptureViewerModel() {
   fs.appendFileSync(logPath, `\n${JSON.stringify(captureEvent(7, 'terminal.snapshot', {
     snapshot: { viewport: '', scrollback: '' }
   }))}`);
-  assert.equal(readCaptureView(logPath, { limit: 10 }).hiddenNoiseEvents, 4);
+  assert.equal(readCaptureView(logPath, { limit: 10 }).hiddenNoiseEvents, 3);
 }
 
-function createRecorder(logPath) {
+function createRecorder(logPath, options = {}) {
   return new RawOutputRecorder({
     config: {
       remoteControl: {
         rawOutputLogEnabled: true,
         rawOutputLogPath: logPath,
-        rawOutputLogMaxBytes: 1024 * 1024
+        rawOutputLogMaxBytes: 1024 * 1024,
+        rawOutputLogRecordTerminalControls: options.recordTerminalControls !== false
       }
     }
   });

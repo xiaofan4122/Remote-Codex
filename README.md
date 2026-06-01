@@ -49,6 +49,10 @@ REMOTE_CODEX_RESUME=last remote-codex
 REMOTE_CODEX_RESUME=SESSION_ID REMOTE_CODEX_RESUME_PROMPT="continue" remote-codex
 ```
 
+When `remote-codex` is stopped from the terminal with Ctrl-C, it prints the
+matching resume command. If the current Codex status screen exposed a native
+session ID, the hint uses that ID; otherwise it falls back to `--resume --last`.
+
 When launched from a terminal, Remote Codex uses that terminal's current
 directory as the default Codex working directory unless you saved another
 default folder in Settings or set `CODEX_WORKDIR`.

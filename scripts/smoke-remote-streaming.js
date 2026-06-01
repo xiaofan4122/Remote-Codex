@@ -29,9 +29,9 @@ function smokeBulletProgress() {
 
   const progress = formatVisualProgressSnapshot(snapshot, input);
   assert.match(progress, /- 我先检查飞书消息解析入口/);
-  assert.match(progress, /- 正在检查代码/);
-  assert.match(progress, /- 正在修改/);
-  assert.doesNotMatch(progress, /src\/plugins\/feishu\/index\.js|Found the parser/);
+  assert.match(progress, /- Read src\/plugins\/feishu\/index\.js/);
+  assert.match(progress, /- Found the parser only keeps plain text content\./);
+  assert.match(progress, /- Edited src\/plugins\/feishu\/index\.js/);
 
   const finalSnapshot = [
     `› ${input}`,
@@ -59,9 +59,10 @@ function smokeBulletProgress() {
   const renderedReviewProgress = formatVisualProgressSnapshot(reviewProgress, reviewInput);
   assert.match(renderedReviewProgress, /- 基础检查都过了/);
   assert.match(renderedReviewProgress, /还有普通文本兜底/);
-  assert.match(renderedReviewProgress, /- 正在验证/);
-  assert.match(renderedReviewProgress, /- 正在检查代码/);
-  assert.doesNotMatch(renderedReviewProgress, /node -c|node -e|│ input|Search isLikelyProgressMarkerText/);
+  assert.match(renderedReviewProgress, /- Ran node -c scripts\/smoke-remote-streaming\.js/);
+  assert.match(renderedReviewProgress, /- Ran node -e "const \{formatVisualSnapshot,formatVisualProgressSnapshot\}=require/);
+  assert.match(renderedReviewProgress, /- Explored/);
+  assert.doesNotMatch(renderedReviewProgress, /│ input|Search isLikelyProgressMarkerText/);
 
   const styledReviewProgress = {
     lines: [
@@ -77,7 +78,7 @@ function smokeBulletProgress() {
     styledReviewProgress,
     reviewInput
   );
-  assert.match(renderedStyledProgress, /- 正在验证/);
+  assert.match(renderedStyledProgress, /- Ran node -c scripts\/smoke-remote-streaming\.js/);
   const renderedStyledColorProgress = formatVisualProgressSnapshot(
     styledReviewProgress,
     reviewInput,
@@ -109,8 +110,9 @@ function smokeBulletProgress() {
     ''
   );
   assert.match(fallbackProgress, /- 基础检查都过了/);
-  assert.match(fallbackProgress, /- (?:<!--remote-codex-color:[^>]+-->)?正在验证/);
-  assert.doesNotMatch(fallbackProgress, /node -e|Search isLikelyProgressMarkerText/);
+  assert.match(fallbackProgress, /- (?:<!--remote-codex-color:[^>]+-->)?Ran node -c scripts\/smoke-remote-streaming\.js/);
+  assert.match(fallbackProgress, /- (?:<!--remote-codex-color:[^>]+-->)?Ran node -e "const \{formatVisualSnapshot,formatVisualProgressSnapshot\}=require/);
+  assert.doesNotMatch(fallbackProgress, /Search isLikelyProgressMarkerText/);
 
   const classifiedStreamProgress = controller.formatStreamingStateOutput(
     {
@@ -124,11 +126,11 @@ function smokeBulletProgress() {
   );
   assert.match(classifiedStreamProgress, /- 基础检查都过了/);
   assert.match(classifiedStreamProgress, /还有普通文本兜底/);
-  assert.match(classifiedStreamProgress, /- (?:<!--remote-codex-color:[^>]+-->)?正在验证/);
-  assert.match(classifiedStreamProgress, /- (?:<!--remote-codex-color:[^>]+-->)?正在检查代码/);
+  assert.match(classifiedStreamProgress, /- (?:<!--remote-codex-color:[^>]+-->)?Ran node -c scripts\/smoke-remote-streaming\.js/);
+  assert.match(classifiedStreamProgress, /- (?:<!--remote-codex-color:[^>]+-->)?Explored/);
   assert.doesNotMatch(
     classifiedStreamProgress,
-    /node -c|node -e|src\/remoteSessionController\.js|Search isLikelyProgressMarkerText/
+    /Search isLikelyProgressMarkerText/
   );
 }
 
@@ -161,11 +163,11 @@ async function smokeWorkingHeartbeat() {
   await controller.startReplyStream(state, {});
   assert.match(initialText, /\*\*进度\*\*\n- Working \(\d+s\)/);
 
-  state.lastStreamText = '**进度**\n- 正在验证';
+  state.lastStreamText = '**进度**\n- Ran npm run test:remote-output-parser';
   controller.sendWorkingHeartbeat(state);
   await new Promise((resolve) => setImmediate(resolve));
   assert.match(updates.at(-1), /\*\*进度\*\*\n- Working \(\d+s\)/);
-  assert.match(updates.at(-1), /- 正在验证/);
+  assert.match(updates.at(-1), /- Ran npm run test:remote-output-parser/);
   controller.clearStreamHeartbeat(state);
 }
 

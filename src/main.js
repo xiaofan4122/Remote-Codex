@@ -12,6 +12,7 @@ const { createLogger } = require('./logger');
 const { RawOutputRecorder } = require('./rawOutputRecorder');
 const { readCaptureView } = require('./terminalCaptureViewer');
 const { parseLaunchOptions, buildCodexArgs } = require('./launchOptions');
+const { buildResumeHint } = require('./resumeHint');
 
 let mainWindow;
 let currentSession;
@@ -19,6 +20,7 @@ let config = loadConfig();
 let remoteController;
 let pluginManager;
 let feishuRegistrationManager;
+let signalShutdownStarted = false;
 const launchOptions = parseLaunchOptions();
 
 const MAIN_I18N = {
@@ -393,6 +395,21 @@ app.on('before-quit', () => {
   manager.killAll();
   appServerRunner.stop();
 });
+
+function handleProcessSignal(signal) {
+  if (signalShutdownStarted) return;
+  signalShutdownStarted = true;
+  console.error(buildResumeHint({
+    command: 'remote-codex',
+    cwd: currentSession?.cwd || config.codex.defaultCwd,
+    session: currentSession,
+    reason: signal
+  }));
+  app.quit();
+}
+
+process.on('SIGINT', () => handleProcessSignal('SIGINT'));
+process.on('SIGTERM', () => handleProcessSignal('SIGTERM'));
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

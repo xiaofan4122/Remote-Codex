@@ -204,7 +204,6 @@ function isLowSignalTerminalFragment(value, raw = '') {
   if (!text) return true;
   if (rawText.includes('\x1b') && !/[\r\n]/.test(rawText)) return true;
   if (text.includes('\n')) return false;
-  if (text.length <= 3 && /^[\p{L}\p{N}._-]+$/u.test(text)) return true;
   if (rawText.includes('\x1b') && text.length <= 16 && !/\s/.test(text)) {
     return true;
   }

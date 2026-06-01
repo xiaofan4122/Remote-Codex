@@ -226,6 +226,7 @@ class RemoteSessionController {
     state.reply = message.reply;
     state.replyPanel = message.replyPanel;
     state.createReplyStream = message.createReplyStream;
+    state.onTurnFinished = message.onTurnFinished;
     await this.flushPendingReply(state);
     this.refreshVisualBusyState(state, 'incoming_message');
     if (isVisualSessionBusy(state)) {
@@ -240,10 +241,17 @@ class RemoteSessionController {
 
     state.lastInputText = text;
     state.turnStartedAt = Date.now();
+    state.turnFinishedNotified = false;
     this.emitRemoteInput(message, text, state);
     this.resetPendingOutput(state);
     await this.startReplyStream(state, message).catch((error) => {
       this.logger.warn?.('Remote reply stream unavailable:', error.message);
+      this.logger.event?.('remote.stream.start.failed', {
+        pluginId: state.pluginId,
+        conversationId: state.conversationId,
+        sessionId: state.session?.id || '',
+        error: error.message
+      });
     });
     state.session.write(buildSubmitInput(text));
   }
@@ -441,6 +449,7 @@ class RemoteSessionController {
       } else {
         await message.reply(finalText);
       }
+      await notifyMessageTurnFinished(message);
       this.logger.event?.('remote.exec.reply.sent', {
         pluginId: message.pluginId,
         conversationId: message.conversationId,
@@ -456,6 +465,7 @@ class RemoteSessionController {
       } else {
         await message.reply(fallback);
       }
+      await notifyMessageTurnFinished(message);
       this.logger.warn?.('Remote exec failed:', error.message);
     } finally {
       state.running = false;
@@ -491,6 +501,7 @@ class RemoteSessionController {
       nativePageActionTimer: null,
       pendingReplyTimer: null,
       createReplyStream: message.createReplyStream,
+      onTurnFinished: message.onTurnFinished,
       replyStream: null,
       replyStreamStarting: false,
       lastReplyText: '',
@@ -502,6 +513,7 @@ class RemoteSessionController {
       pendingReplyText: '',
       streamedThisTurn: false,
       streamFinishedForTurn: false,
+      turnFinishedNotified: false,
       streamClosedText: '',
       nativePanelUpdateRequested: false,
       controlActionLocks: new Map(),
@@ -699,6 +711,7 @@ class RemoteSessionController {
     state.reply = message.reply;
     state.replyPanel = message.replyPanel;
     state.createReplyStream = message.createReplyStream;
+    state.onTurnFinished = message.onTurnFinished;
     this.discardPendingReply(state, 'native_slash_command');
     this.logger.event?.('remote.native_slash.start', {
       pluginId: message.pluginId,
@@ -728,6 +741,7 @@ class RemoteSessionController {
 
     state.lastInputText = commandText;
     state.turnStartedAt = Date.now();
+    state.turnFinishedNotified = false;
     state.nativeCommand = {
       command,
       text: commandText,
@@ -743,6 +757,13 @@ class RemoteSessionController {
     };
     await this.startReplyStream(state, message).catch((error) => {
       this.logger.warn?.('Remote reply stream unavailable:', error.message);
+      this.logger.event?.('remote.stream.start.failed', {
+        pluginId: state.pluginId,
+        conversationId: state.conversationId,
+        sessionId: state.session?.id || '',
+        command,
+        error: error.message
+      });
     });
     await writeNativeSlashCommand(state.session, commandText);
   }
@@ -897,6 +918,12 @@ class RemoteSessionController {
         state.replyStream && outputConfig.outputMode === 'final'
           ? this.formatStreamingStateOutput(state, output, formatted)
           : formatted;
+      const mergedStreamText =
+        state.replyStream &&
+        outputConfig.outputMode === 'final' &&
+        !state.nativeCommand
+          ? mergeStreamingTurnText(state.lastStreamText, streamText)
+          : streamText;
       this.captureCleaningSample(state, output, formatted, streamText);
       if (state.nativeCommand && formatted) {
         this.logger.event?.('remote.native_slash.output', {
@@ -906,7 +933,7 @@ class RemoteSessionController {
           command: state.nativeCommand.command,
           rawChars: String(output || '').length,
           formattedChars: String(formatted || '').length,
-          streamChars: String(streamText || '').length,
+          streamChars: String(mergedStreamText || '').length,
           hasReplyStream: Boolean(state.replyStream),
           snapshotLines: collectNativeVisualLines(
             state.session?.visualViewportSnapshot || state.session?.visualSnapshot
@@ -915,15 +942,14 @@ class RemoteSessionController {
         });
       }
       const formattedSignature = remoteMessageSignature(formatted);
-      const streamSignature = remoteMessageSignature(streamText);
       if (!formatted || formattedSignature === state.lastReplySignature) {
         if (
           state.replyStream &&
-          streamText &&
-          streamSignature !== state.lastStreamSignature
+          mergedStreamText &&
+          remoteMessageSignature(mergedStreamText) !== state.lastStreamSignature
         ) {
-          state.lastStreamText = streamText;
-          this.updateReplyStream(state, streamText, {
+          state.lastStreamText = mergedStreamText;
+          this.updateReplyStream(state, mergedStreamText, {
             final: shouldFinishReplyStream(state, formatted),
             keepOpen: isPersistentNativeSlashPage(state.nativeCommand?.command),
             finishDelayMs: this.getStreamFinishDelayMs(state, outputConfig)
@@ -946,8 +972,8 @@ class RemoteSessionController {
         state.outputBuffer = '';
       }
       if (state.replyStream) {
-        state.lastStreamText = streamText;
-        this.updateReplyStream(state, streamText, {
+        state.lastStreamText = mergedStreamText;
+        this.updateReplyStream(state, mergedStreamText, {
           final: shouldFinishReplyStream(state, formatted),
           keepOpen: isPersistentNativeSlashPage(state.nativeCommand?.command),
           finishDelayMs: this.getStreamFinishDelayMs(state, outputConfig)
@@ -1034,6 +1060,7 @@ class RemoteSessionController {
       if (!finalText || finalText === state.lastSentReplyText) return;
       this.safeReply(state, finalText).then(() => {
         state.turnStartedAt = 0;
+        this.notifyTurnFinished(state);
       });
     }, delayMs);
   }
@@ -1049,6 +1076,7 @@ class RemoteSessionController {
     if (finalText === state.lastSentReplyText) return;
     await this.safeReply(state, finalText);
     state.turnStartedAt = 0;
+    this.notifyTurnFinished(state);
   }
 
   discardPendingReply(state, reason = 'discard') {
@@ -1210,6 +1238,16 @@ class RemoteSessionController {
       options.immediate && typeof state.replyStream?.replace === 'function'
         ? 'replace'
         : 'update';
+    this.logger.event?.('remote.stream.update', {
+      pluginId: state.pluginId,
+      conversationId: state.conversationId,
+      sessionId: state.session?.id || '',
+      method: updateMethod,
+      final: Boolean(options.final),
+      keepOpen: Boolean(options.keepOpen),
+      heartbeat: Boolean(options.heartbeat),
+      chars: String(text || '').length
+    });
     state.replyStream
       ?.[updateMethod](text)
       .catch((error) => {
@@ -1250,6 +1288,7 @@ class RemoteSessionController {
           state.lastSentReplyText = text;
           state.lastSentReplySignature = signature;
           state.turnStartedAt = 0;
+          this.notifyTurnFinished(state);
         })
         .catch((error) => {
           this.logger.warn?.('Remote reply stream finish failed:', error.message);
@@ -1263,6 +1302,7 @@ class RemoteSessionController {
               state.streamClosedText = text;
               state.lastSentReplySignature = signature;
               state.turnStartedAt = 0;
+              this.notifyTurnFinished(state);
             });
           }
         })
@@ -1324,6 +1364,14 @@ class RemoteSessionController {
       STREAM_FINAL_DEBOUNCE_MS,
       Number.isFinite(configured) ? configured : 0
     );
+  }
+
+  notifyTurnFinished(state) {
+    if (!state || state.turnFinishedNotified) return;
+    state.turnFinishedNotified = true;
+    notifyMessageTurnFinished(state).catch((error) => {
+      this.logger.warn?.('Remote turn finish callback failed:', error.message);
+    });
   }
 
   async safeReply(state, text) {
@@ -1411,7 +1459,8 @@ class RemoteSessionController {
     ) {
       const rendered = formatVisualSnapshot(
         state.session.visualSnapshot,
-        state.lastInputText
+        state.lastInputText,
+        { allowMissingPrompt: Boolean(state.turnStartedAt) }
       );
       if (rendered) return rendered;
       return '';
@@ -1440,7 +1489,8 @@ class RemoteSessionController {
             state.lastInputText,
             {
               colorMarkers: state.pluginId === 'feishu',
-              finalText
+              finalText,
+              allowMissingPrompt: Boolean(state.turnStartedAt)
             }
           ) ||
           formatClassifiedVisualTurnStream(
@@ -1448,7 +1498,8 @@ class RemoteSessionController {
             state.lastInputText,
             {
               colorMarkers: state.pluginId === 'feishu',
-              finalText
+              finalText,
+              allowMissingPrompt: Boolean(state.turnStartedAt)
             }
           ) ||
           formatVisualProgressSnapshot(
@@ -1456,12 +1507,14 @@ class RemoteSessionController {
             state.lastInputText,
             {
               colorMarkers: state.pluginId === 'feishu',
-              finalText
+              finalText,
+              allowMissingPrompt: Boolean(state.turnStartedAt)
             }
           ) ||
           formatVisualProgressSnapshot(state.session.visualSnapshot, state.lastInputText, {
             colorMarkers: state.pluginId === 'feishu',
-            finalText
+            finalText,
+            allowMissingPrompt: Boolean(state.turnStartedAt)
           }) ||
           formatTerminalProgress(data, {
             colorMarkers: state.pluginId === 'feishu',
@@ -1874,6 +1927,7 @@ class RemoteSessionController {
         this.logger.warn?.('Remote native page stream final update failed:', error.message);
       })
       .then(() => stream.finish(text))
+      .then(() => this.notifyTurnFinished(state))
       .catch((error) => {
         this.logger.warn?.('Remote native page stream finish failed:', error.message);
       });
@@ -2045,6 +2099,11 @@ function stripTerminalControls(data) {
     .replace(/\n{3,}/g, '\n\n');
 }
 
+async function notifyMessageTurnFinished(message) {
+  if (typeof message?.onTurnFinished !== 'function') return;
+  await message.onTurnFinished();
+}
+
 function formatTerminalText(data) {
   const lines = normalizeTerminalLines(data)
     .map((line) => line.text)
@@ -2186,7 +2245,7 @@ function extractFinalAnswer(lines) {
   return candidates.join('\n');
 }
 
-function formatVisualSnapshot(snapshot, inputText = '') {
+function formatVisualSnapshot(snapshot, inputText = '', options = {}) {
   const input = normalizeComparableText(inputText);
   const lines = String(snapshot || '')
     .split('\n')
@@ -2196,8 +2255,10 @@ function formatVisualSnapshot(snapshot, inputText = '') {
   if (lines.length === 0) return '';
 
   const promptIndex = findLastSubmittedPrompt(lines, input);
-  if (input && promptIndex < 0) return '';
-  const afterPrompt = promptIndex >= 0 ? lines.slice(promptIndex + 1) : lines;
+  if (input && promptIndex < 0 && !options.allowMissingPrompt) return '';
+  const afterPrompt = trimExternalNativeSlashPageFromTurnLines(
+    promptIndex >= 0 ? lines.slice(promptIndex + 1) : lines
+  );
   const blocks = splitVisualBlocks(afterPrompt);
   const candidates = blocks
     .map((block) => extractVisualAnswerBlock(block, input))
@@ -2236,16 +2297,28 @@ function extractVisualAnswerBlock(lines, input) {
   const answer = [];
   let hasAnswerMarker = false;
   let inCodeBlock = false;
+  let skippingProgressContinuation = false;
 
   for (const rawLine of lines) {
     const line = rawLine.trimEnd();
     const value = line.trim();
     if (!value) continue;
+    if (skippingProgressContinuation) {
+      if (/^\s{2,}\S/.test(line)) {
+        continue;
+      }
+      skippingProgressContinuation = false;
+    }
     if (isLikelyPromptOrStatus(value)) {
       if (answer.length > 0) break;
       continue;
     }
     if (isVisualNoiseLine(value, input)) continue;
+    const progressEntry = normalizeProgressEntry(line);
+    if (progressEntry.isBullet && isLikelyProgressMarkerText(progressEntry.value)) {
+      skippingProgressContinuation = true;
+      continue;
+    }
 
     const markerIndex = findAnswerMarkerIndex(line);
     if (markerIndex >= 0) {
@@ -2341,8 +2414,10 @@ function formatVisualProgressSnapshot(snapshot, inputText = '', options = {}) {
     .filter((record) => !BOX_ONLY_PATTERN.test(record.text.trim()));
   const lines = records.map((record) => record.text);
   const promptIndex = findLastSubmittedPrompt(lines, input);
-  if (input && promptIndex < 0) return '';
-  const afterPrompt = promptIndex >= 0 ? records.slice(promptIndex + 1) : records;
+  if (input && promptIndex < 0 && !options.allowMissingPrompt) return '';
+  const afterPrompt = trimExternalNativeSlashPageFromTurnRecords(
+    promptIndex >= 0 ? records.slice(promptIndex + 1) : records
+  );
   return renderCodexProgressState(
     parseCodexProgressState(afterPrompt, {
       includeUnstructuredNotes: true,
@@ -2359,9 +2434,13 @@ function classifyVisualTurnOutput(snapshot, inputText = '', options = {}) {
     .filter((record) => !BOX_ONLY_PATTERN.test(record.text.trim()));
   const lines = records.map((record) => record.text);
   const promptIndex = findLastSubmittedPrompt(lines, input);
-  if (input && promptIndex < 0) return emptyTurnOutputClassification();
+  if (input && promptIndex < 0 && !options.allowMissingPrompt) {
+    return emptyTurnOutputClassification();
+  }
 
-  const afterPrompt = promptIndex >= 0 ? records.slice(promptIndex + 1) : records;
+  const afterPrompt = trimExternalNativeSlashPageFromTurnRecords(
+    promptIndex >= 0 ? records.slice(promptIndex + 1) : records
+  );
   const approval = extractApprovalPrompt(afterPrompt.map((record) => record.text));
   const entries = afterPrompt
     .map((record) => normalizeProgressEntry(record))
@@ -2374,19 +2453,27 @@ function classifyVisualTurnOutput(snapshot, inputText = '', options = {}) {
   const visualText = lines.join('\n');
   const finalText =
     extractClassifiedVisualFinalAnswer(afterPrompt, { active: hasRunningStatus }) ||
-    formatVisualSnapshot(visualText, inputText);
+    (hasRunningStatus ? '' : formatVisualSnapshot(visualText, inputText, options));
   const finalComparable = normalizeComparableText(finalText);
   const classified = emptyTurnOutputClassification();
   classified.approval = approval;
   classified.finalText = finalText;
 
   let currentActivity = null;
+  let lastExplanationIndex = -1;
   for (const entry of entries) {
-    if (isClassifiedFinalDuplicate(entry.value, finalComparable)) continue;
+    if (
+      !entry.isIndented &&
+      isClassifiedFinalDuplicate(entry.value, finalComparable) &&
+      isStandaloneClassifiedFinalDuplicate(entry.value, finalComparable)
+    ) {
+      continue;
+    }
 
     if (isProgressWarning(entry.value)) {
       pushUniqueString(classified.warnings, formatProgressWarning(entry.value));
       currentActivity = null;
+      lastExplanationIndex = -1;
       continue;
     }
 
@@ -2399,8 +2486,10 @@ function classifyVisualTurnOutput(snapshot, inputText = '', options = {}) {
           terminalColor: entry.terminalColor || ''
         };
         currentActivity = null;
+        lastExplanationIndex = -1;
       } else {
         currentActivity = addClassifiedActivity(classified, entry);
+        lastExplanationIndex = -1;
       }
       continue;
     }
@@ -2408,6 +2497,7 @@ function classifyVisualTurnOutput(snapshot, inputText = '', options = {}) {
     if (ACTIVITY_LINE_PATTERN.test(entry.value)) {
       currentActivity = addClassifiedActivity(classified, entry);
       pushUniqueString(classified.technical, entry.value);
+      lastExplanationIndex = -1;
       continue;
     }
 
@@ -2418,6 +2508,17 @@ function classifyVisualTurnOutput(snapshot, inputText = '', options = {}) {
 
     if (currentActivity && entry.isIndented && isUsefulProgressNote(entry.value)) {
       pushUniqueString(classified.explanations, normalizeProgressDetail(entry.value));
+      lastExplanationIndex = classified.explanations.length - 1;
+      continue;
+    }
+
+    if (
+      !currentActivity &&
+      lastExplanationIndex >= 0 &&
+      entry.isIndented &&
+      isUsefulProgressNote(entry.value)
+    ) {
+      classified.explanations[lastExplanationIndex] = `${classified.explanations[lastExplanationIndex]} ${normalizeProgressDetail(entry.value)}`.replace(/\s+/g, ' ');
       continue;
     }
 
@@ -2427,6 +2528,7 @@ function classifyVisualTurnOutput(snapshot, inputText = '', options = {}) {
       isUsefulProgressNote(entry.value)
     ) {
       pushUniqueString(classified.explanations, entry.value);
+      lastExplanationIndex = classified.explanations.length - 1;
       currentActivity = null;
       continue;
     }
@@ -2439,6 +2541,7 @@ function classifyVisualTurnOutput(snapshot, inputText = '', options = {}) {
       isUsefulProgressNote(entry.value)
     ) {
       pushUniqueString(classified.explanations, entry.value);
+      lastExplanationIndex = classified.explanations.length - 1;
       currentActivity = null;
       continue;
     }
@@ -2470,7 +2573,7 @@ function renderClassifiedTurnStream(classified, options = {}) {
   }
 
   for (const explanation of classified.explanations || []) {
-    progressLines.push(`- ${withRemoteCodexColorMarker(explanation, TERMINAL_ROLE_COLORS.info, options)}`);
+    progressLines.push(`- ${explanation}`);
   }
 
   const seenActivitySummaries = new Set();
@@ -2496,6 +2599,92 @@ function renderClassifiedTurnStream(classified, options = {}) {
     sections.push(`**回复**\n${finalText}`);
   }
   return sections.join('\n\n').trim();
+}
+
+function mergeStreamingTurnText(previousText, nextText) {
+  const previous = parseRemoteMarkdownSections(previousText);
+  const next = parseRemoteMarkdownSections(nextText);
+  if (!next.hasKnownSections) return String(nextText || '').trim();
+  if (!previous.hasKnownSections) return String(nextText || '').trim();
+
+  const warnings = mergeUniqueLines(previous.warnings, next.warnings);
+  const progress = mergeProgressLines(previous.progress, next.progress);
+  const reply = next.reply || previous.reply;
+  const sections = [];
+  if (warnings.length > 0) sections.push(['**警告**', ...warnings].join('\n'));
+  if (progress.length > 0) sections.push(['**进度**', ...progress].join('\n'));
+  if (reply) sections.push(`**回复**\n${reply}`);
+  return sections.join('\n\n').trim();
+}
+
+function parseRemoteMarkdownSections(text) {
+  const sections = {
+    warnings: [],
+    progress: [],
+    reply: '',
+    other: [],
+    hasKnownSections: false
+  };
+  let current = '';
+  const replyLines = [];
+  for (const rawLine of String(text || '').split('\n')) {
+    const line = rawLine.trimEnd();
+    const marker = line.trim();
+    if (/^\*\*警告\*\*$/.test(marker)) {
+      current = 'warnings';
+      sections.hasKnownSections = true;
+      continue;
+    }
+    if (/^\*\*进度\*\*$/.test(marker)) {
+      current = 'progress';
+      sections.hasKnownSections = true;
+      continue;
+    }
+    if (/^\*\*回复\*\*$/.test(marker)) {
+      current = 'reply';
+      sections.hasKnownSections = true;
+      continue;
+    }
+    if (!line.trim()) {
+      if (current === 'reply' && replyLines.length > 0) replyLines.push('');
+      continue;
+    }
+    if (current === 'warnings') {
+      sections.warnings.push(line);
+    } else if (current === 'progress') {
+      sections.progress.push(line);
+    } else if (current === 'reply') {
+      replyLines.push(line);
+    } else {
+      sections.other.push(line);
+    }
+  }
+  sections.reply = replyLines.join('\n').trim();
+  return sections;
+}
+
+function mergeProgressLines(previousLines, nextLines) {
+  const previous = (previousLines || []).filter((line) => !isWorkingStatusLine(line));
+  const next = nextLines || [];
+  const currentWorking = next.filter(isWorkingStatusLine);
+  const nextRest = next.filter((line) => !isWorkingStatusLine(line));
+  return [
+    ...currentWorking,
+    ...mergeUniqueLines(previous, nextRest)
+  ];
+}
+
+function mergeUniqueLines(previousLines, nextLines) {
+  const lines = [];
+  const seen = new Set();
+  for (const line of [...(previousLines || []), ...(nextLines || [])]) {
+    const value = String(line || '').trimEnd();
+    const signature = stripRemoteCodexColorMarkers(value).replace(/\s+/g, ' ').trim();
+    if (!signature || seen.has(signature)) continue;
+    seen.add(signature);
+    lines.push(value);
+  }
+  return lines;
 }
 
 function classifiedActivityColor(activity) {
@@ -2524,10 +2713,164 @@ function emptyTurnOutputClassification() {
   };
 }
 
+function trimExternalNativeSlashPageFromTurnRecords(records) {
+  const list = Array.isArray(records) ? records : [];
+  const indexes = findExternalNativeSlashPageBlockIndexes(
+    list.map((record) => normalizeSnapshotLineRecord(record).text)
+  );
+  if (indexes.length === 0) return list;
+  return list.filter((_record, index) => !indexes.includes(index));
+}
+
+function trimExternalNativeSlashPageFromTurnLines(lines) {
+  const list = Array.isArray(lines) ? lines : [];
+  const indexes = findExternalNativeSlashPageBlockIndexes(list);
+  if (indexes.length === 0) return list;
+  return list.filter((_line, index) => !indexes.includes(index));
+}
+
+function findExternalNativeSlashPageBlockIndexes(lines) {
+  const normalized = (Array.isArray(lines) ? lines : [])
+    .map((line) => normalizeNativeLine(line));
+  const indexes = [];
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    const line = normalized[index];
+    if (!line) continue;
+    if (isSubmittedNativeSlashPrompt(line)) {
+      indexes.push(index);
+      continue;
+    }
+    if (findNativeSlashDisabledMessage([line], '/status')) {
+      indexes.push(index);
+      continue;
+    }
+    if (findNativeSlashDisabledMessage([line], '/resume')) {
+      indexes.push(index);
+      continue;
+    }
+    if (findNativeSlashDisabledMessage([line], '/permissions')) {
+      indexes.push(index);
+      continue;
+    }
+    if (isNativeSlashPageTitleLine(line) && hasNativeSlashPageContext(normalized, index)) {
+      const endIndex = findExternalNativeSlashPageBlockEndIndex(normalized, index);
+      for (let cursor = index; cursor < endIndex; cursor += 1) {
+        indexes.push(cursor);
+      }
+      index = endIndex - 1;
+    }
+  }
+
+  return indexes;
+}
+
+function findExternalNativeSlashPageBlockEndIndex(lines, startIndex) {
+  const title = String(lines[startIndex] || '').trim();
+  const command = /^>_\s+OpenAI Codex\b/i.test(title)
+    ? '/status'
+    : /^Resume a previous session$/i.test(title)
+      ? '/resume'
+      : /^Update Model Permissions$/i.test(title)
+        ? '/permissions'
+        : '';
+  let index = startIndex + 1;
+  while (index < lines.length && isExternalNativeSlashPageBlockLine(lines[index], command)) {
+    index += 1;
+  }
+  return index;
+}
+
+function isExternalNativeSlashPageBlockLine(line, command) {
+  const value = String(line || '').trim();
+  if (!value) return true;
+  if (isSubmittedNativeSlashPrompt(value)) return false;
+  if (command === '/status') {
+    return isStatusSlashPanelLine(value);
+  }
+  if (command === '/resume') {
+    return isResumeSlashPanelLine(value);
+  }
+  if (command === '/permissions') {
+    return isPermissionsSlashPanelLine(value);
+  }
+  return false;
+}
+
+function isStatusSlashPanelLine(line) {
+  const value = String(line || '').trim();
+  return (
+    /^Visit\s+https?:\/\/chatgpt\.com\/codex\/settings\/usage\b/i.test(value) ||
+    /^information on rate limits and credits\b/i.test(value) ||
+    /^(?:Model|Permissions|Directory|Session|Account|Agents\.md|Collaboration mode|5h limit|Weekly limit):/i.test(value)
+  );
+}
+
+function isResumeSlashPanelLine(line) {
+  const value = String(line || '').trim();
+  return (
+    /^Type to search\b/i.test(value) ||
+    /^(?:enter resume|esc exit|ctrl\+|tab focus|←|↑|↓)/i.test(value) ||
+    /^(?:[>›❯]\s*)?\d+\.\s+/.test(value) ||
+    /^(?:(?:❯|>|›)\s*)?(?:just now|\d+\s*[smhdw]\s+ago|\d{4}-\d{2}-\d{2}|[A-Z][a-z]{2}\s+\d{1,2})\s+.+/i.test(value) ||
+    /^\d+\s*\/\s*\d+$/.test(value) ||
+    /more\b/i.test(value)
+  );
+}
+
+function isPermissionsSlashPanelLine(line) {
+  const value = String(line || '').trim();
+  return (
+    /^(?:[>›❯]\s*)?\d+\.\s+(?:Default|Auto-review|Full Access)\b/i.test(value) ||
+    /^(?:Default|Auto-review|Full Access)\b/i.test(value) ||
+    /^(?:Codex can|Same workspace-write|through the auto-reviewer|approval\.|to access the internet|Exercise caution)/i.test(value) ||
+    /^(?:Press enter to confirm|esc to go back|tab to focus)/i.test(value)
+  );
+}
+
+function isSubmittedNativeSlashPrompt(line) {
+  const value = String(line || '').trim().toLowerCase();
+  return /^›\s+\/(?:status|resume|permission|permissions|perm)(?:\s|$)/.test(value);
+}
+
+function isNativeSlashPageTitleLine(line) {
+  const value = String(line || '').trim();
+  return (
+    /^>_\s+OpenAI Codex\b/i.test(value) ||
+    /^Resume a previous session$/i.test(value) ||
+    /^Update Model Permissions$/i.test(value)
+  );
+}
+
+function hasNativeSlashPageContext(lines, index) {
+  const windowText = lines
+    .slice(index, Math.min(lines.length, index + 10))
+    .join('\n');
+  if (/^>_\s+OpenAI Codex\b/im.test(windowText)) {
+    return /^(?:Model|Permissions|Directory|Session|Account|Agents\.md|Collaboration mode|5h limit|Weekly limit):/im.test(windowText);
+  }
+  if (/^Resume a previous session$/im.test(windowText)) {
+    return /(?:enter resume|esc exit|Type to search|^\s*(?:[>›❯]\s*)?\d+\.|just now|\d+\s*[smhdw]\s+ago)/im.test(windowText);
+  }
+  if (/^Update Model Permissions$/im.test(windowText)) {
+    return /\b(?:Default|Auto-review|Full Access)\b/i.test(windowText);
+  }
+  return false;
+}
+
 function isClassifiedFinalDuplicate(value, finalComparable) {
   if (!finalComparable) return false;
   const comparable = normalizeComparableText(value);
   return Boolean(comparable && finalComparable.includes(comparable));
+}
+
+function isStandaloneClassifiedFinalDuplicate(value, finalComparable) {
+  const comparable = normalizeComparableText(value);
+  return Boolean(
+    comparable &&
+      finalComparable &&
+      (comparable === finalComparable || finalComparable.endsWith(comparable))
+  );
 }
 
 function extractClassifiedVisualFinalAnswer(records, options = {}) {
@@ -2621,6 +2964,11 @@ function isTechnicalProgressLine(value) {
   if (/^\$\s+/.test(text)) return true;
   if (/^(?:└|├|│)\s+/.test(text)) return true;
   if (/\b(?:src|scripts|test|tests|lib|app)\/[\w./-]+/.test(text)) return true;
+  if (/\b[\w./-]+\.(?:js|jsx|ts|tsx|mjs|cjs|json|md|css|html|py|sh)\b/.test(text)) return true;
+  if (/\b(?:Search|Read|Edited|Updated|Added|Removed|Created|Deleted|Opened|Found|Listed|Viewed)\s+[\w|()./\\-]+/i.test(text)) {
+    return true;
+  }
+  if (/[|\\]\s*[\w.]+\(.*\)/.test(text)) return true;
   if (/\b(?:npm|node|git|rg|sed|cat|python|pytest)\b/.test(text)) return true;
   return false;
 }
@@ -3636,14 +3984,15 @@ function formatProgressWarning(value) {
 
 function formatProgressActivity(value) {
   const text = String(value || '').trim();
-  if (/^(?:Ran|Checked)\b/i.test(text)) return '正在验证';
-  if (/^(?:Edited|Updated|Added|Removed|Created|Deleted|Applied|Wrote)\b/i.test(text)) {
-    return '正在修改';
-  }
-  if (/^(?:Explored|Read|Opened|Searched|Found|Listed|Viewed)\b/i.test(text)) {
-    return '正在检查代码';
-  }
-  return '正在处理';
+  return formatProgressActivityText(text) || '正在处理';
+}
+
+function formatProgressActivityText(value) {
+  const text = String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text) return '';
+  return clipForDisplay(text, 180);
 }
 
 function addProgressItem(state, type, text, entry = null, options = {}) {
@@ -3710,6 +4059,7 @@ function isUsefulProgressNote(value) {
   const text = String(value || '').trim();
   if (!text) return false;
   if (ACTIVITY_LINE_PATTERN.test(text) || RUNNING_STATUS_PATTERN.test(text)) return false;
+  if (isTechnicalProgressLine(text)) return false;
   if (/^(?:Would you like|Reason:|\$\s+|\d+\.)/i.test(text)) return false;
   if (/^(?:Use \/skills|Tip:|OpenAI Codex|model:|directory:)/i.test(text)) return false;
   return text.length >= 8;
@@ -4032,6 +4382,12 @@ function clipForLog(text, max = 1200) {
   const value = String(text || '');
   if (value.length <= max) return value;
   return `${value.slice(0, max)}...[truncated]`;
+}
+
+function clipForDisplay(text, max = 180) {
+  const value = String(text || '').trim();
+  if (value.length <= max) return value;
+  return `${value.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
 }
 
 function normalizeDelayMs(value, fallback) {
@@ -4631,6 +4987,7 @@ module.exports = {
   isCompleteStatusSlashOutput,
   parseCodexProgressState,
   renderCodexProgressState,
+  mergeStreamingTurnText,
   classifyTerminalColorRole,
   buildSubmitInput,
   buildControlInput,

@@ -234,13 +234,77 @@ class FeishuPlugin {
     if (!text) return;
     this.logger.event?.('feishu.message.accepted', {
       chatId: message.chatId,
+      messageId: message.messageId,
       senderOpenId: message.senderOpenId,
       text: clipForLog(text)
+    });
+    this.addAckReaction(message).catch((error) => {
+      this.logger.warn?.('Feishu ack reaction failed:', error.message);
     });
 
     this.dispatchRemoteMessage(message, text).catch((error) =>
       this.handleRemoteDispatchError(message, error)
     );
+  }
+
+  async addAckReaction(message) {
+    if (!this.pluginConfig.ackReactionEnabled) return;
+    if (this.pluginConfig.mode === 'custom_webhook') return;
+    if (!message?.messageId) return;
+
+    const emojiType = normalizeReactionEmoji(this.pluginConfig.ackReactionEmoji || 'OK');
+    if (!emojiType) return;
+    await this.addMessageReaction({
+      messageId: message.messageId,
+      emojiType
+    });
+  }
+
+  async addDoneReaction(message) {
+    if (!this.pluginConfig.doneReactionEnabled) return;
+    if (this.pluginConfig.mode === 'custom_webhook') return;
+    if (!message?.messageId) return;
+
+    const emojiType = normalizeReactionEmoji(this.pluginConfig.doneReactionEmoji || 'DONE');
+    if (!emojiType) return;
+    try {
+      await this.addMessageReaction({
+        messageId: message.messageId,
+        emojiType
+      });
+    } catch (error) {
+      this.logger.warn?.('Feishu done reaction failed:', error.message);
+    }
+  }
+
+  async addMessageReaction({ messageId, emojiType }) {
+    const response = await fetch(
+      `${FEISHU_API_BASE}/im/v1/messages/${encodeURIComponent(messageId)}/reactions`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${await this.getTenantAccessToken()}`,
+          'content-type': 'application/json; charset=utf-8'
+        },
+        body: JSON.stringify({
+          reaction_type: {
+            emoji_type: emojiType
+          }
+        })
+      }
+    );
+
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || result.code) {
+      throw new Error(
+        `Feishu reaction failed: ${response.status} ${result.code || ''} ${result.msg || ''}`.trim()
+      );
+    }
+    this.logger.event?.('feishu.message.ack_reaction', {
+      messageId,
+      emojiType
+    });
+    return result;
   }
 
   async dispatchRemoteMessage(message, text) {
@@ -262,6 +326,9 @@ class FeishuPlugin {
           receiveIdType: 'chat_id',
           panel
         });
+      },
+      onTurnFinished: async () => {
+        await this.addDoneReaction(message);
       },
       createReplyStream: async ({ title, initialText, controlMode } = {}) => {
         if (!this.pluginConfig.streaming) {
@@ -455,6 +522,11 @@ class FeishuPlugin {
             receiveIdType: 'chat_id',
             panel
           });
+        },
+        onTurnFinished: async () => {
+          if (action.messageId) {
+            await this.addDoneReaction({ messageId: action.messageId });
+          }
         },
         createReplyStream: async ({ title, initialText, controlMode } = {}) => {
           if (!action.chatId) return null;
@@ -870,6 +942,12 @@ class FeishuPlugin {
         }
       }
     );
+    this.logger.event?.('feishu.stream.updated', {
+      cardId,
+      elementId,
+      sequence,
+      chars: String(text || '').length
+    });
   }
 
   async closeStreamingCard({ cardId, sequence, summary }) {
@@ -1238,6 +1316,13 @@ function normalizeRemoteAction(action) {
     return value === 'permissions' ? 'permission' : value;
   }
   return '';
+}
+
+function normalizeReactionEmoji(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[^\w-]/g, '')
+    .toUpperCase();
 }
 
 function shouldDedupeCardAction(action) {
@@ -2225,7 +2310,7 @@ function enhanceCodexMarkdown(text) {
       }
       if (inCodeBlock || !compact) return value;
       if (markedColor) {
-        return colorCardText(value, markedColor);
+        return colorCardText(formatCodexCardLine(value), markedColor);
       }
       if (/^\*\*等待确认\*\*$/.test(compact)) {
         return colorCardText('**等待确认**', CARD_COLORS.approval);
@@ -2261,10 +2346,10 @@ function enhanceCodexMarkdown(text) {
         return colorCardText(compact, CARD_COLORS.running);
       }
       if (/^-\s+(?:Ran|Explored|Opened|Searched|Found|Listed|Viewed)\b/i.test(compact)) {
-        return colorCardText(compact, CARD_COLORS.command);
+        return colorCardText(formatCodexCardLine(compact), CARD_COLORS.command);
       }
       if (/^-\s+(?:Read|Edited|Updated|Created|Deleted|Checked|Applied|Wrote)\b/i.test(compact)) {
-        return colorCardText(compact, CARD_COLORS.success);
+        return colorCardText(formatCodexCardLine(compact), CARD_COLORS.success);
       }
       if (/^-\s+(?:Would you like|Reason:|[123]\.)/i.test(compact)) {
         return colorCardText(compact, CARD_COLORS.approval);
@@ -2275,17 +2360,50 @@ function enhanceCodexMarkdown(text) {
       if (/^可在卡片按钮中选择/.test(compact)) {
         return colorCardText(compact, CARD_COLORS.muted);
       }
-      if (/^Ran\b/.test(compact)) return colorCardText(compact, CARD_COLORS.command);
-      if (/^Explored\b/.test(compact)) return colorCardText(compact, CARD_COLORS.command);
+      if (/^Ran\b/.test(compact)) return colorCardText(formatCodexCardLine(compact), CARD_COLORS.command);
+      if (/^Explored\b/.test(compact)) return colorCardText(formatCodexCardLine(compact), CARD_COLORS.command);
       if (/^(?:Read|Edited|Updated|Created|Deleted|Checked|Applied|Wrote)\b/.test(compact)) {
-        return colorCardText(`- ${compact}`, CARD_COLORS.success);
+        return colorCardText(formatCodexCardLine(`- ${compact}`), CARD_COLORS.success);
       }
       if (/^└\s+/.test(compact)) {
-        return `> ${colorCardText(compact, CARD_COLORS.muted)}`;
+        return `> ${colorCardText(formatCodexCardLine(compact), CARD_COLORS.muted)}`;
       }
-      return value;
+      return formatCodexCardLine(value);
     })
     .join('\n');
+}
+
+function formatCodexCardLine(line) {
+  return highlightCodexInlineTokens(preserveCodexIndentation(line));
+}
+
+function preserveCodexIndentation(line) {
+  return String(line || '').replace(/^ +/, (spaces) => {
+    const pairs = Math.floor(spaces.length / 2);
+    const rest = spaces.length % 2;
+    return `${'　'.repeat(pairs)}${rest ? ' ' : ''}`;
+  });
+}
+
+function highlightCodexInlineTokens(line) {
+  const value = String(line || '');
+  if (value.includes('`')) return value;
+  const action = value.match(/^(\s*(?:[-•]\s+)?)(Ran|Read|Edited|Updated|Created|Deleted|Checked|Applied|Wrote|Explored|Opened|Searched|Found|Listed|Viewed)\s+(.+)$/i);
+  if (action) {
+    const [, prefix, verb, detail] = action;
+    if (/^(?:Ran|Explored|Opened|Searched|Found|Listed|Viewed)$/i.test(verb)) {
+      return `${prefix}${verb} ${inlineCode(detail)}`;
+    }
+    return `${prefix}${verb} ${highlightFileLikeTokens(detail)}`;
+  }
+  return highlightFileLikeTokens(value);
+}
+
+function highlightFileLikeTokens(text) {
+  return String(text || '').replace(
+    /(^|[\s([{"'，。；：、])((?:\.{1,2}\/|\/)?[\w@./-]+\.(?:js|jsx|ts|tsx|mjs|cjs|json|md|css|html|py|sh|yml|yaml|toml|lock|txt)(?::\d+)?)(?=$|[\s)\]}"'，。；：、])/g,
+    (match, prefix, filePath) => `${prefix}${inlineCode(filePath)}`
+  );
 }
 
 function colorCardText(text, color) {

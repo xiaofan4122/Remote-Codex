@@ -65,12 +65,14 @@ function smokeCardMarkdownCodexColors() {
     [
       '**进度**',
       '- <!--remote-codex-color:rgba(96,165,250,1)-->Ran node -c test.js',
-      '  <!--remote-codex-color:rgba(100,116,139,1)-->└ Search parser'
+      '  <!--remote-codex-color:rgba(100,116,139,1)-->└ Search parser',
+      '- Edited src/plugins/feishu/index.js'
     ].join('\n')
   );
 
-  assert.match(markdown, /<font color='cus-remote-progress'>- Ran node -c test\.js<\/font>/);
-  assert.match(markdown, /<font color='cus-remote-muted'>  └ Search parser<\/font>/);
+  assert.match(markdown, /<font color='cus-remote-progress'>- Ran `node -c test\.js`<\/font>/);
+  assert.match(markdown, /<font color='cus-remote-muted'>　└ Search parser<\/font>/);
+  assert.match(markdown, /<font color='cus-remote-success'>- Edited `src\/plugins\/feishu\/index\.js`<\/font>/);
   assert.doesNotMatch(markdown, /remote-codex-color/);
 
   const card = feishuPlugin.__private.buildStreamingCard({

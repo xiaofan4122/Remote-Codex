@@ -22,6 +22,7 @@ class RawOutputRecorder {
       rawConfig.rawOutputLogPath ||
       path.join(os.homedir(), '.local', 'state', 'remote-codex', 'raw-output.jsonl');
     this.maxBytes = Number(rawConfig.rawOutputLogMaxBytes) || DEFAULT_MAX_BYTES;
+    this.recordTerminalControls = Boolean(rawConfig.rawOutputLogRecordTerminalControls);
     this.warned = false;
   }
 
@@ -34,6 +35,9 @@ class RawOutputRecorder {
   }
 
   recordOutput(session, chunk) {
+    if (!this.recordTerminalControls && isLowSignalTerminalPayload(chunk.data, 'pty.output')) {
+      return;
+    }
     this.recordSessionEvent(session, 'pty.output', {
       cursor: chunk.cursor,
       bytes: Buffer.byteLength(String(chunk.data || ''), 'utf8'),
@@ -43,6 +47,9 @@ class RawOutputRecorder {
   }
 
   recordInput(session, data) {
+    if (!this.recordTerminalControls && isLowSignalTerminalPayload(data, 'pty.input')) {
+      return;
+    }
     this.recordSessionEvent(session, 'pty.input', {
       cursor: session.cursor,
       bytes: Buffer.byteLength(String(data || ''), 'utf8'),
@@ -52,6 +59,7 @@ class RawOutputRecorder {
   }
 
   recordResize(session, previous, next) {
+    if (!this.recordTerminalControls) return;
     this.recordSessionEvent(session, 'terminal.resize', {
       cursor: session.cursor,
       previous: normalizeTerminalSize(previous),
@@ -188,6 +196,28 @@ function stripControlPreview(data) {
     .trim();
 }
 
+function stripTerminalControls(data) {
+  return String(data || '')
+    .replace(/\x1B\][\s\S]*?(?:\x07|\x1B\\)/g, '')
+    .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '')
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n');
+}
+
+function isLowSignalTerminalPayload(data, type = 'pty.output') {
+  const raw = String(data || '');
+  const readable = stripTerminalControls(raw).trim();
+  if (!readable) return true;
+  if (type === 'pty.input') return false;
+  if (raw.includes('\x1b') && !/[\r\n]/.test(raw)) return true;
+  if (readable.includes('\n')) return false;
+  if (raw.includes('\x1b') && readable.length <= 16 && !/\s/.test(readable)) {
+    return true;
+  }
+  return /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]+$/u.test(readable);
+}
+
 function clipForLog(text, max) {
   const value = String(text || '');
   if (value.length <= max) return value;
@@ -199,5 +229,6 @@ module.exports = {
   DEFAULT_MAX_BYTES,
   RawOutputRecorder,
   hashJson,
+  isLowSignalTerminalPayload,
   normalizeTerminalSnapshot
 };

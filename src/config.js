@@ -33,6 +33,7 @@ const defaultConfig = {
     rawOutputLogEnabled: true,
     rawOutputLogPath: '',
     rawOutputLogMaxBytes: 52428800,
+    rawOutputLogRecordTerminalControls: false,
     flushIntervalMs: 250,
     finalReplyDebounceMs: 6000
   },
@@ -53,6 +54,10 @@ const defaultConfig = {
       sendOutput: true,
       outputMode: 'final',
       streaming: true,
+      ackReactionEnabled: true,
+      ackReactionEmoji: 'OK',
+      doneReactionEnabled: true,
+      doneReactionEmoji: 'DONE',
       connectSource: '',
       connectedAt: '',
       authorizedOpenId: '',
@@ -151,6 +156,9 @@ function getEnvConfig() {
       rawOutputLogEnabled: parseBoolean(process.env.REMOTE_CODEX_RAW_OUTPUT_LOG),
       rawOutputLogPath: process.env.REMOTE_CODEX_RAW_OUTPUT_LOG_PATH,
       rawOutputLogMaxBytes: parseNumber(process.env.REMOTE_CODEX_RAW_OUTPUT_LOG_MAX_BYTES),
+      rawOutputLogRecordTerminalControls: parseBoolean(
+        process.env.REMOTE_CODEX_RAW_OUTPUT_LOG_RECORD_TERMINAL_CONTROLS
+      ),
       finalReplyDebounceMs: parseNumber(process.env.REMOTE_CODEX_FINAL_REPLY_DEBOUNCE_MS)
     },
     plugins: {
@@ -166,7 +174,11 @@ function getEnvConfig() {
         customWebhookSecret: process.env.FEISHU_WEBHOOK_SECRET,
         allowedOpenIds: parseList(process.env.FEISHU_ALLOWED_OPEN_IDS),
         allowedChatIds: parseList(process.env.FEISHU_ALLOWED_CHAT_IDS),
-        requireMention: parseBoolean(process.env.FEISHU_REQUIRE_MENTION)
+        requireMention: parseBoolean(process.env.FEISHU_REQUIRE_MENTION),
+        ackReactionEnabled: parseBoolean(process.env.FEISHU_ACK_REACTION_ENABLED),
+        ackReactionEmoji: process.env.FEISHU_ACK_REACTION_EMOJI,
+        doneReactionEnabled: parseBoolean(process.env.FEISHU_DONE_REACTION_ENABLED),
+        doneReactionEmoji: process.env.FEISHU_DONE_REACTION_EMOJI
       }
     }
   };
