@@ -23,6 +23,7 @@ class RawOutputRecorder {
       path.join(os.homedir(), '.local', 'state', 'remote-codex', 'raw-output.jsonl');
     this.maxBytes = Number(rawConfig.rawOutputLogMaxBytes) || DEFAULT_MAX_BYTES;
     this.recordTerminalControls = Boolean(rawConfig.rawOutputLogRecordTerminalControls);
+    this.recordParserTraceEnabled = rawConfig.rawOutputLogRecordParserTrace !== false;
     this.warned = false;
   }
 
@@ -76,6 +77,15 @@ class RawOutputRecorder {
       cursor: session.cursor,
       hash,
       snapshot: payload
+    });
+    return true;
+  }
+
+  recordParserTrace(session, payload = {}) {
+    if (!this.recordParserTraceEnabled) return false;
+    this.recordSessionEvent(session, 'parser.trace', {
+      cursor: session.cursor,
+      ...payload
     });
     return true;
   }

@@ -16,6 +16,7 @@ const {
 } = require('../src/remoteSessionController');
 
 const command = process.argv[2] || '/resume';
+const listCommands = command === '--list';
 const timeoutMs = Number(process.env.REMOTE_CODEX_NATIVE_SLASH_TIMEOUT_MS) || 30000;
 const cwd = process.env.REMOTE_CODEX_NATIVE_SLASH_CWD || process.cwd();
 const cols = Number(process.env.REMOTE_CODEX_NATIVE_SLASH_COLS) || 120;
@@ -44,14 +45,23 @@ async function main() {
 
   try {
     await waitForReady(terminal, () => lastDataAt, timeoutMs);
-    await writeNativeSlashCommand(session, command);
-    await waitForNativeOutput(terminal, command, timeoutMs);
+    let commandRows = [];
+    if (listCommands) {
+      session.write('/');
+      await waitForSlashCommandList(terminal, () => lastDataAt, timeoutMs);
+      commandRows = await collectSlashCommandList(session, terminal);
+    } else {
+      await writeNativeSlashCommand(session, command);
+      await waitForNativeOutput(terminal, command, timeoutMs);
+    }
     const snapshot = readTerminalViewport(terminal);
     session.recordSnapshot({
       scrollback: readTerminalScrollback(terminal),
       viewport: snapshot
     });
-    const formatted = formatNativeSlashOutput({ snapshot, command });
+    const formatted = listCommands
+      ? commandRows.join('\n')
+      : formatNativeSlashOutput({ snapshot, command });
     console.log('--- viewport ---');
     console.log(snapshot);
     console.log('--- formatted ---');
@@ -66,6 +76,59 @@ async function main() {
   } finally {
     manager.killAll();
   }
+}
+
+function waitForSlashCommandList(terminal, getLastDataAt, timeout) {
+  const started = Date.now();
+  let stableChecks = 0;
+  return new Promise((resolve, reject) => {
+    const timer = setInterval(() => {
+      const snapshot = readTerminalViewport(terminal);
+      const idleFor = Date.now() - getLastDataAt();
+      if (/\/permissions\b/.test(snapshot) && /\/model\b/.test(snapshot) && idleFor >= 500) {
+        stableChecks += 1;
+      } else {
+        stableChecks = 0;
+      }
+      if (stableChecks >= 2) {
+        clearInterval(timer);
+        resolve();
+        return;
+      }
+      if (Date.now() - started > timeout) {
+        clearInterval(timer);
+        reject(new Error(`Timed out waiting for slash command list.\n${snapshot}`));
+      }
+    }, 250);
+  });
+}
+
+async function collectSlashCommandList(session, terminal) {
+  const commands = [];
+  const seen = new Set();
+  let unchanged = 0;
+  for (let step = 0; step < 120 && unchanged < 14; step += 1) {
+    const before = commands.length;
+    collectVisibleSlashCommands(readTerminalViewport(terminal), commands, seen);
+    unchanged = commands.length === before ? unchanged + 1 : 0;
+    session.write('\x1b[B');
+    await delay(45);
+  }
+  collectVisibleSlashCommands(readTerminalViewport(terminal), commands, seen);
+  return commands;
+}
+
+function collectVisibleSlashCommands(snapshot, commands, seen) {
+  for (const line of String(snapshot || '').split('\n')) {
+    const match = line.match(/^\s*[>›❯]?\s*(\/[a-z][\w-]*)(?:\s{2,}|\s+-\s+)(.+)$/i);
+    if (!match || seen.has(match[1])) continue;
+    seen.add(match[1]);
+    commands.push(`${match[1]} - ${match[2].trim()}`);
+  }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function waitForReady(terminal, getLastDataAt, timeout) {
@@ -130,12 +193,15 @@ function isNativeSlashSmokeReady(snapshot, formatted, slashCommand) {
   if (!formatted || /(?:Codex 正在处理|Working \(\d+s\))/.test(formatted)) {
     return false;
   }
+  if (/(?:Booting MCP server|MCP startup|Starting MCP|Loading)/i.test(snapshot)) {
+    return false;
+  }
   if (slashCommand === '/status') {
     return isCompleteStatusSlashOutput(formatted);
   }
   if (slashCommand === '/permissions') {
-    return /1\. Default\b/.test(formatted) &&
-      /2\. Auto-review\b/.test(formatted) &&
+    return /1\. (?:Default|Ask for approval)\b/.test(formatted) &&
+      /2\. (?:Auto-review|Approve for me)\b/.test(formatted) &&
       /3\. Full Access\b/.test(formatted);
   }
   if (snapshot.includes(`› ${slashCommand}`)) return false;

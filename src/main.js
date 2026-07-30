@@ -1,16 +1,18 @@
 const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
-const fs = require('node:fs');
 const path = require('node:path');
 const { loadConfig, saveConfig } = require('./config');
-const { CodexSessionManager } = require('./codexSessionManager');
+const {
+  CodexSessionManager,
+  isCodexUpdateSuccessOutput
+} = require('./codexSessionManager');
 const { CodexAppServerRunner } = require('./codexAppServerRunner');
 const { CodexExecRunner } = require('./codexExecRunner');
+const { CodexRolloutReader } = require('./codexRolloutReader');
 const { RemoteSessionController } = require('./remoteSessionController');
 const { PluginManager } = require('./plugins/pluginManager');
 const { FeishuRegistrationManager } = require('./plugins/feishu/registrationManager');
 const { createLogger } = require('./logger');
 const { RawOutputRecorder } = require('./rawOutputRecorder');
-const { readCaptureView } = require('./terminalCaptureViewer');
 const { parseLaunchOptions, buildCodexArgs } = require('./launchOptions');
 const { buildResumeHint } = require('./resumeHint');
 const { buildRemoteInputNotice } = require('./remoteVisualNotice');
@@ -23,6 +25,7 @@ let pluginManager;
 let feishuRegistrationManager;
 let signalShutdownStarted = false;
 const launchOptions = parseLaunchOptions();
+const CODEX_UPDATE_RESTART_DELAY_MS = 1200;
 
 const MAIN_I18N = {
   'zh-CN': {
@@ -40,15 +43,43 @@ const MAIN_I18N = {
 };
 
 const logger = createLogger();
-const rawOutputRecorder = new RawOutputRecorder({ config, logger });
-const manager = new CodexSessionManager({ config, outputRecorder: rawOutputRecorder });
+const diagnosticOutputRecorder = createDiagnosticOutputRecorder(logger);
+const manager = new CodexSessionManager({
+  config,
+  outputRecorder: diagnosticOutputRecorder
+});
 const execRunner = new CodexExecRunner({ config, logger });
 const appServerRunner = new CodexAppServerRunner({ config, logger });
+const rolloutReader = new CodexRolloutReader({ logger });
+
+function createDiagnosticOutputRecorder(diagnosticLogger) {
+  if (!/^(1|true|yes|on)$/i.test(String(process.env.REMOTE_CODEX_DIAGNOSTIC_CAPTURE || ''))) {
+    return null;
+  }
+  const recorder = new RawOutputRecorder({
+    logger: diagnosticLogger,
+    config: {
+      remoteControl: {
+        rawOutputLogEnabled: true,
+        rawOutputLogPath: process.env.REMOTE_CODEX_DIAGNOSTIC_CAPTURE_PATH || '',
+        rawOutputLogMaxBytes: 50 * 1024 * 1024,
+        rawOutputLogRecordTerminalControls: true,
+        rawOutputLogRecordParserTrace: true
+      }
+    }
+  });
+  diagnosticLogger.info('Native TUI diagnostic capture enabled', {
+    logFile: recorder.logPath
+  });
+  return recorder;
+}
 
 function createPluginRuntime() {
   remoteController = new RemoteSessionController({
     sessionManager: manager,
-    execRunner: appServerRunner,
+    execRunner,
+    appServerRunner,
+    rolloutReader,
     config,
     logger,
     sharedSessionProvider: ({ cwd, restart }) => {
@@ -81,7 +112,6 @@ function createPluginRuntime() {
 
 async function restartPlugins() {
   remoteController?.updateConfig(config);
-  rawOutputRecorder.updateConfig(config);
   manager.updateConfig(config);
   execRunner.updateConfig(config);
   appServerRunner.updateConfig(config);
@@ -99,6 +129,11 @@ async function applyFeishuRegistration(result) {
 
   feishu.enabled = true;
   feishu.mode = 'long_connection';
+  feishu.singleCardOutput = true;
+  feishu.streaming = true;
+  feishu.segmentedOutput = false;
+  feishu.ackReactionEnabled = true;
+  feishu.ackReactionEmoji = '了解';
   feishu.appId = result.client_id;
   feishu.appSecret = result.client_secret;
   feishu.connectSource = 'register_app';
@@ -115,7 +150,6 @@ async function applyFeishuRegistration(result) {
 
   nextConfig.plugins.feishu = feishu;
   config = saveConfig(nextConfig);
-  rawOutputRecorder.updateConfig(config);
   manager.updateConfig(config);
   execRunner.updateConfig(config);
   appServerRunner.updateConfig(config);
@@ -150,6 +184,11 @@ function getFeishuRegistrationManager() {
 }
 
 function createWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.focus();
+    return mainWindow;
+  }
+
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -160,12 +199,17 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: false
     }
   });
 
   mainWindow.loadFile(path.join(__dirname, 'renderer.html'));
   installContextMenu(mainWindow);
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+  return mainWindow;
 }
 
 function installContextMenu(window) {
@@ -220,6 +264,10 @@ function startCodex(cwd = config.codex.defaultCwd) {
   });
 
   session.on('exit', ({ exitCode, signal }) => {
+    const shouldRestartAfterUpdate =
+      exitCode === 0 &&
+      !signal &&
+      isCodexUpdateSuccessOutput(session.outputTail);
     mainWindow?.webContents.send(
       'terminal:data',
       `\r\n[Codex exited: code=${exitCode}, signal=${signal || 'none'}]\r\n`
@@ -230,8 +278,20 @@ function startCodex(cwd = config.codex.defaultCwd) {
     logger.event('visual.session.exited', {
       sessionId: session.id,
       exitCode,
-      signal: signal || null
+      signal: signal || null,
+      restartAfterUpdate: shouldRestartAfterUpdate
     });
+    if (shouldRestartAfterUpdate) {
+      mainWindow?.webContents.send(
+        'terminal:data',
+        '\r\n[Remote Codex] Codex update completed; restarting Codex...\r\n'
+      );
+      setTimeout(() => {
+        if (!currentSession) {
+          startCodex(session.cwd || cwd || config.codex.defaultCwd);
+        }
+      }, CODEX_UPDATE_RESTART_DELAY_MS);
+    }
   });
 
   mainWindow?.webContents.send('session:cwd', cwd);
@@ -266,7 +326,6 @@ app.whenReady().then(() => {
 
   ipcMain.handle('config:save', async (_event, nextConfig) => {
     config = saveConfig(nextConfig || config);
-    rawOutputRecorder.updateConfig(config);
     manager.updateConfig(config);
     execRunner.updateConfig(config);
     appServerRunner.updateConfig(config);
@@ -283,44 +342,9 @@ app.whenReady().then(() => {
     return { config, pluginError };
   });
 
-  ipcMain.handle('plugins:status', () => pluginManager.getStatuses());
-
-  ipcMain.handle('plugins:action', async (_event, pluginId, action, payload) => {
-    return pluginManager.invoke(pluginId, action, payload);
-  });
-
-  ipcMain.handle('logs:open-raw-output', async () => {
-    const logPath = rawOutputRecorder.logPath;
-    fs.mkdirSync(path.dirname(logPath), { recursive: true });
-    fs.closeSync(fs.openSync(logPath, 'a'));
-    const error = await shell.openPath(logPath);
-    if (error) {
-      shell.showItemInFolder(logPath);
-    }
-    return { ok: true, path: logPath, openedFile: !error };
-  });
-
-  ipcMain.handle('logs:capture-view', (_event, options) => {
-    return readCaptureView(rawOutputRecorder.logPath, options);
-  });
-
-  ipcMain.handle('debug:state', () => {
-    return remoteController?.buildDebugState(currentSession) || {
-      at: new Date().toISOString(),
-      phase: currentSession ? 'idle' : 'detached',
-      busy: false,
-      hasRemoteState: false,
-      remote: null,
-      session: currentSession?.status?.() || null,
-      detection: {},
-      text: {}
-    };
-  });
-
   ipcMain.handle('feishu:connect-start', async (_event, nextConfig) => {
     if (nextConfig && typeof nextConfig === 'object') {
       config = saveConfig(nextConfig);
-      rawOutputRecorder.updateConfig(config);
       manager.updateConfig(config);
       execRunner.updateConfig(config);
       appServerRunner.updateConfig(config);
@@ -359,23 +383,7 @@ app.whenReady().then(() => {
   });
 
   ipcMain.on('terminal:snapshot', (_event, text) => {
-    if (!currentSession) return;
-    currentSession.recordSnapshot(text);
-    if (text && typeof text === 'object') {
-      currentSession.visualSnapshot = String(text.scrollback || '');
-      currentSession.visualViewportSnapshot = String(text.viewport || '');
-      currentSession.visualStyledSnapshot = normalizeStyledSnapshot(
-        text.styledScrollback
-      );
-      currentSession.visualStyledViewportSnapshot = normalizeStyledSnapshot(
-        text.styledViewport
-      );
-      return;
-    }
-    currentSession.visualSnapshot = String(text || '');
-    currentSession.visualViewportSnapshot = String(text || '');
-    currentSession.visualStyledSnapshot = null;
-    currentSession.visualStyledViewportSnapshot = null;
+    ingestTerminalSnapshot(text);
   });
 
   mainWindow.webContents.once('did-finish-load', () => {
@@ -389,7 +397,7 @@ app.whenReady().then(() => {
   });
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (!mainWindow || mainWindow.isDestroyed()) createWindow();
   });
 });
 
@@ -399,6 +407,7 @@ app.on('before-quit', () => {
     console.error('Failed to stop plugins:', error);
     logger.error('Failed to stop plugins', { error: error.message });
   });
+  rolloutReader.stopAll();
   manager.killAll();
   appServerRunner.stop();
 });
@@ -464,6 +473,31 @@ function runVisualSmokeTestIfRequested() {
 function mainText(key) {
   const language = config.ui?.language === 'en' ? 'en' : 'zh-CN';
   return MAIN_I18N[language]?.[key] || MAIN_I18N.en[key] || key;
+}
+
+function ingestTerminalSnapshot(text) {
+  if (!currentSession) return;
+
+  if (text && typeof text === 'object') {
+    const snapshot = { ...text };
+    delete snapshot.requestId;
+    currentSession.recordSnapshot(snapshot);
+    currentSession.visualSnapshot = String(snapshot.scrollback || '');
+    currentSession.visualViewportSnapshot = String(snapshot.viewport || '');
+    currentSession.visualStyledSnapshot = normalizeStyledSnapshot(
+      snapshot.styledScrollback
+    );
+    currentSession.visualStyledViewportSnapshot = normalizeStyledSnapshot(
+      snapshot.styledViewport
+    );
+    return;
+  }
+
+  currentSession.recordSnapshot(text);
+  currentSession.visualSnapshot = String(text || '');
+  currentSession.visualViewportSnapshot = String(text || '');
+  currentSession.visualStyledSnapshot = null;
+  currentSession.visualStyledViewportSnapshot = null;
 }
 
 function normalizeStyledSnapshot(snapshot) {

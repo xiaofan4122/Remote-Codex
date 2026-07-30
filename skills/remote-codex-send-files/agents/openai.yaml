@@ -1,0 +1,4 @@
+interface:
+  display_name: "Remote Codex Send Files"
+  short_description: "Send workspace files to the active Feishu chat"
+  default_prompt: "Send the generated file to me through Remote Codex."

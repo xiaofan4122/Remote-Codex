@@ -2,11 +2,13 @@ const http = require('node:http');
 const { URL } = require('node:url');
 const { loadConfig, saveConfig } = require('./config');
 const { CodexSessionManager } = require('./codexSessionManager');
+const { CodexAppServerRunner } = require('./codexAppServerRunner');
+const { CodexExecRunner } = require('./codexExecRunner');
+const { CodexRolloutReader } = require('./codexRolloutReader');
 const { RemoteSessionController } = require('./remoteSessionController');
 const { PluginManager } = require('./plugins/pluginManager');
 const { FeishuRegistrationManager } = require('./plugins/feishu/registrationManager');
 const { createLogger } = require('./logger');
-const { RawOutputRecorder } = require('./rawOutputRecorder');
 const { buildResumeHint } = require('./resumeHint');
 
 let config = loadConfig();
@@ -15,10 +17,15 @@ const port = Number(config.api.port);
 const allowCommandOverride = Boolean(config.api.allowCommandOverride);
 const apiToken = config.api.token || '';
 const logger = createLogger();
-const rawOutputRecorder = new RawOutputRecorder({ config, logger });
-const manager = new CodexSessionManager({ config, outputRecorder: rawOutputRecorder });
+const manager = new CodexSessionManager({ config });
+const execRunner = new CodexExecRunner({ config, logger });
+const appServerRunner = new CodexAppServerRunner({ config, logger });
+const rolloutReader = new CodexRolloutReader({ logger });
 const remoteController = new RemoteSessionController({
   sessionManager: manager,
+  execRunner,
+  appServerRunner,
+  rolloutReader,
   config,
   logger
 });
@@ -35,7 +42,6 @@ function cloneConfig(value = config) {
 
 async function restartPlugins() {
   remoteController.updateConfig(config);
-  rawOutputRecorder.updateConfig(config);
   manager.updateConfig(config);
   await pluginManager.restart(config);
 }
@@ -63,7 +69,6 @@ async function applyFeishuRegistration(result) {
 
   nextConfig.plugins.feishu = feishu;
   config = saveConfig(nextConfig);
-  rawOutputRecorder.updateConfig(config);
   manager.updateConfig(config);
 
   let pluginError = '';
@@ -310,7 +315,9 @@ async function shutdown(signal = '') {
     console.error('Failed to stop plugins:', error);
     logger.error('Failed to stop plugins', { error: error.message });
   });
+  rolloutReader.stopAll();
   manager.killAll();
+  appServerRunner.stop();
   server.close(() => process.exit(0));
 }
 

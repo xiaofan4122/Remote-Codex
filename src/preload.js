@@ -8,12 +8,6 @@ contextBridge.exposeInMainWorld('codexShell', {
   startFeishuConnect: (config) => ipcRenderer.invoke('feishu:connect-start', config),
   cancelFeishuConnect: () => ipcRenderer.invoke('feishu:connect-cancel'),
   getFeishuConnectStatus: () => ipcRenderer.invoke('feishu:connect-status'),
-  getPluginStatus: () => ipcRenderer.invoke('plugins:status'),
-  pluginAction: (pluginId, action, payload) =>
-    ipcRenderer.invoke('plugins:action', pluginId, action, payload),
-  openRawOutputLog: () => ipcRenderer.invoke('logs:open-raw-output'),
-  getCaptureLogView: (options) => ipcRenderer.invoke('logs:capture-view', options),
-  getDebugState: () => ipcRenderer.invoke('debug:state'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   write: (data) => ipcRenderer.send('terminal:input', data),
   resize: (size) => ipcRenderer.send('terminal:resize', size),

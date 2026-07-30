@@ -7,6 +7,30 @@ const { loadConfig } = require('./config');
 const moduleConfig = loadConfig();
 const defaultCommand = moduleConfig.codex.command || 'codex';
 const defaultCwd = moduleConfig.codex.defaultCwd || os.homedir();
+const INHERITED_CODEX_PACKAGE_MANAGER_ENV_KEYS = [
+  'npm_config_user_agent',
+  'npm_execpath',
+  'CODEX_MANAGED_BY_BUN',
+  'CODEX_MANAGED_BY_NPM',
+  'CODEX_MANAGED_PACKAGE_ROOT'
+];
+const OUTPUT_TAIL_MAX_CHARS = 16000;
+
+function sanitizeInheritedCodexPackageManagerEnv(env = {}) {
+  const sanitized = { ...(env || {}) };
+  for (const key of INHERITED_CODEX_PACKAGE_MANAGER_ENV_KEYS) {
+    delete sanitized[key];
+  }
+  return sanitized;
+}
+
+function isCodexUpdateSuccessOutput(text) {
+  const value = String(text || '');
+  return (
+    /Update ran successfully/i.test(value) &&
+    /Please restart Codex/i.test(value)
+  );
+}
 
 class CodexSession extends EventEmitter {
   constructor({
@@ -32,6 +56,7 @@ class CodexSession extends EventEmitter {
     this.exit = null;
     this.cursor = 0;
     this.output = [];
+    this.outputTail = '';
     this.maxBufferedChunks = Number(maxBufferedChunks) || 5000;
     this.outputRecorder = outputRecorder || null;
 
@@ -41,7 +66,7 @@ class CodexSession extends EventEmitter {
       rows,
       cwd,
       env: {
-        ...process.env,
+        ...sanitizeInheritedCodexPackageManagerEnv(process.env),
         ...env,
         TERM: 'xterm-256color',
         COLORTERM: 'truecolor'
@@ -50,6 +75,7 @@ class CodexSession extends EventEmitter {
     this.outputRecorder?.recordSessionStart(this);
 
     this.shell.onData((data) => {
+      this.outputTail = `${this.outputTail}${data}`.slice(-OUTPUT_TAIL_MAX_CHARS);
       const chunk = {
         cursor: ++this.cursor,
         data,
@@ -122,7 +148,8 @@ class CodexSession extends EventEmitter {
       exitedAt: this.exitedAt,
       exited: Boolean(this.exit),
       exit: this.exit,
-      cursor: this.cursor
+      cursor: this.cursor,
+      outputTail: this.outputTail
     };
   }
 
@@ -204,5 +231,7 @@ class CodexSessionManager {
 module.exports = {
   CodexSessionManager,
   defaultCommand,
-  defaultCwd
+  defaultCwd,
+  isCodexUpdateSuccessOutput,
+  sanitizeInheritedCodexPackageManagerEnv
 };

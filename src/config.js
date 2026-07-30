@@ -4,8 +4,7 @@ const path = require('node:path');
 
 const defaultConfig = {
   ui: {
-    language: 'zh-CN',
-    debugPanelEnabled: false
+    language: 'zh-CN'
   },
   codex: {
     command: 'codex',
@@ -27,13 +26,7 @@ const defaultConfig = {
     autoCreateSession: true,
     sendOutput: true,
     outputMode: 'final',
-    responseSource: 'visual_terminal',
-    captureCleaningCorpus: false,
-    cleaningCorpusPath: '',
-    rawOutputLogEnabled: true,
-    rawOutputLogPath: '',
-    rawOutputLogMaxBytes: 52428800,
-    rawOutputLogRecordTerminalControls: false,
+    responseSource: 'rollout_jsonl',
     flushIntervalMs: 250,
     finalReplyDebounceMs: 6000
   },
@@ -53,9 +46,18 @@ const defaultConfig = {
       requireMention: false,
       sendOutput: true,
       outputMode: 'final',
+      flushIntervalMs: 100,
+      finalReplyDebounceMs: 1500,
+      singleCardOutput: true,
       streaming: true,
+      segmentedOutput: false,
+      fileTransferEnabled: true,
+      fileTransferMaxBytes: 31457280,
+      fileTransferMaxFiles: 5,
+      latexRenderingEnabled: true,
+      latexMaxFormulas: 64,
       ackReactionEnabled: true,
-      ackReactionEmoji: 'OK',
+      ackReactionEmoji: '了解',
       doneReactionEnabled: true,
       doneReactionEmoji: 'DONE',
       connectSource: '',
@@ -131,8 +133,7 @@ function parseList(value) {
 function getEnvConfig() {
   return {
     ui: {
-      language: process.env.REMOTE_CODEX_LANGUAGE || process.env.CODEX_UI_LANGUAGE,
-      debugPanelEnabled: parseBoolean(process.env.REMOTE_CODEX_DEBUG_PANEL)
+      language: process.env.REMOTE_CODEX_LANGUAGE || process.env.CODEX_UI_LANGUAGE
     },
     codex: {
       command: process.env.CODEX_COMMAND,
@@ -151,14 +152,7 @@ function getEnvConfig() {
       allowCommandOverride: parseBoolean(process.env.CODEX_API_ALLOW_COMMAND)
     },
     remoteControl: {
-      captureCleaningCorpus: parseBoolean(process.env.REMOTE_CODEX_CAPTURE_CLEANING),
-      cleaningCorpusPath: process.env.REMOTE_CODEX_CLEANING_CORPUS,
-      rawOutputLogEnabled: parseBoolean(process.env.REMOTE_CODEX_RAW_OUTPUT_LOG),
-      rawOutputLogPath: process.env.REMOTE_CODEX_RAW_OUTPUT_LOG_PATH,
-      rawOutputLogMaxBytes: parseNumber(process.env.REMOTE_CODEX_RAW_OUTPUT_LOG_MAX_BYTES),
-      rawOutputLogRecordTerminalControls: parseBoolean(
-        process.env.REMOTE_CODEX_RAW_OUTPUT_LOG_RECORD_TERMINAL_CONTROLS
-      ),
+      responseSource: process.env.REMOTE_CODEX_RESPONSE_SOURCE,
       finalReplyDebounceMs: parseNumber(process.env.REMOTE_CODEX_FINAL_REPLY_DEBOUNCE_MS)
     },
     plugins: {
@@ -175,6 +169,16 @@ function getEnvConfig() {
         allowedOpenIds: parseList(process.env.FEISHU_ALLOWED_OPEN_IDS),
         allowedChatIds: parseList(process.env.FEISHU_ALLOWED_CHAT_IDS),
         requireMention: parseBoolean(process.env.FEISHU_REQUIRE_MENTION),
+        flushIntervalMs: parseNumber(process.env.FEISHU_FLUSH_INTERVAL_MS),
+        finalReplyDebounceMs: parseNumber(process.env.FEISHU_FINAL_REPLY_DEBOUNCE_MS),
+        singleCardOutput: parseBoolean(process.env.FEISHU_SINGLE_CARD_OUTPUT),
+        streaming: parseBoolean(process.env.FEISHU_STREAMING),
+        segmentedOutput: parseBoolean(process.env.FEISHU_SEGMENTED_OUTPUT),
+        fileTransferEnabled: parseBoolean(process.env.FEISHU_FILE_TRANSFER_ENABLED),
+        fileTransferMaxBytes: parseNumber(process.env.FEISHU_FILE_TRANSFER_MAX_BYTES),
+        fileTransferMaxFiles: parseNumber(process.env.FEISHU_FILE_TRANSFER_MAX_FILES),
+        latexRenderingEnabled: parseBoolean(process.env.FEISHU_LATEX_RENDERING_ENABLED),
+        latexMaxFormulas: parseNumber(process.env.FEISHU_LATEX_MAX_FORMULAS),
         ackReactionEnabled: parseBoolean(process.env.FEISHU_ACK_REACTION_ENABLED),
         ackReactionEmoji: process.env.FEISHU_ACK_REACTION_EMOJI,
         doneReactionEnabled: parseBoolean(process.env.FEISHU_DONE_REACTION_ENABLED),
@@ -201,6 +205,16 @@ function normalizeConfig(config, configPath = getConfigPath()) {
   const next = deepMerge(defaultConfig, config);
   next.configPath = configPath;
 
+  for (const key of [
+    'rawOutputLogEnabled',
+    'rawOutputLogPath',
+    'rawOutputLogMaxBytes',
+    'rawOutputLogRecordTerminalControls',
+    'rawOutputLogRecordParserTrace'
+  ]) {
+    delete next.remoteControl[key];
+  }
+
   if (!isPlainObject(next.ui)) {
     next.ui = {};
   }
@@ -214,6 +228,31 @@ function normalizeConfig(config, configPath = getConfigPath()) {
   next.plugins.feishu.outputMode = normalizeOutputMode(
     next.plugins.feishu.outputMode || next.remoteControl.outputMode
   );
+  next.plugins.feishu.singleCardOutput =
+    next.plugins.feishu.singleCardOutput !== false;
+  if (next.plugins.feishu.singleCardOutput) {
+    next.plugins.feishu.streaming = true;
+    next.plugins.feishu.segmentedOutput = false;
+  }
+  next.plugins.feishu.fileTransferEnabled =
+    next.plugins.feishu.fileTransferEnabled !== false;
+  next.plugins.feishu.fileTransferMaxBytes = normalizePositiveInteger(
+    next.plugins.feishu.fileTransferMaxBytes,
+    defaultConfig.plugins.feishu.fileTransferMaxBytes,
+    defaultConfig.plugins.feishu.fileTransferMaxBytes
+  );
+  next.plugins.feishu.fileTransferMaxFiles = normalizePositiveInteger(
+    next.plugins.feishu.fileTransferMaxFiles,
+    defaultConfig.plugins.feishu.fileTransferMaxFiles,
+    20
+  );
+  next.plugins.feishu.latexRenderingEnabled =
+    next.plugins.feishu.latexRenderingEnabled !== false;
+  next.plugins.feishu.latexMaxFormulas = normalizePositiveInteger(
+    next.plugins.feishu.latexMaxFormulas,
+    defaultConfig.plugins.feishu.latexMaxFormulas,
+    defaultConfig.plugins.feishu.latexMaxFormulas
+  );
   if (
     next.plugins.feishu.streaming &&
     next.remoteControl.outputMode === 'final' &&
@@ -222,10 +261,18 @@ function normalizeConfig(config, configPath = getConfigPath()) {
     next.remoteControl.flushIntervalMs = defaultConfig.remoteControl.flushIntervalMs;
   }
 
-  if (!next.codex.defaultCwd) {
-    next.codex.defaultCwd =
-      process.env.REMOTE_CODEX_LAUNCH_CWD || process.cwd() || os.homedir();
-  }
+  const configuredDefaultCwd = next.codex.defaultCwd || '';
+  const launchCwd =
+    process.env.REMOTE_CODEX_LAUNCH_CWD || process.cwd() || os.homedir();
+  const useConfiguredDefaultCwd = parseBoolean(
+    process.env.REMOTE_CODEX_USE_CONFIG_DEFAULT_CWD
+  );
+
+  next.codex.configuredDefaultCwd = configuredDefaultCwd;
+  next.codex.launchCwd = launchCwd;
+  next.codex.defaultCwd = useConfiguredDefaultCwd
+    ? configuredDefaultCwd || launchCwd
+    : process.env.CODEX_WORKDIR || launchCwd;
 
   return next;
 }
@@ -248,8 +295,15 @@ function normalizeOutputMode(value) {
 
 function normalizeResponseSource(value) {
   const source = String(value || '').trim();
-  if (['app_server', 'exec_json', 'visual_terminal', 'pty'].includes(source)) return source;
+  if (source === 'visual_terminal' || source === 'pty') return 'rollout_jsonl';
+  if (['app_server', 'exec_json', 'rollout_jsonl'].includes(source)) return source;
   return defaultConfig.remoteControl.responseSource;
+}
+
+function normalizePositiveInteger(value, fallback, maximum) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return fallback;
+  return Math.min(Math.floor(number), maximum);
 }
 
 function loadConfig(options = {}) {
@@ -263,6 +317,13 @@ function loadConfig(options = {}) {
 
 function stripRuntimeFields(config) {
   const next = deepMerge(config);
+  if (next.codex) {
+    if (Object.prototype.hasOwnProperty.call(next.codex, 'configuredDefaultCwd')) {
+      next.codex.defaultCwd = next.codex.configuredDefaultCwd || '';
+    }
+    delete next.codex.configuredDefaultCwd;
+    delete next.codex.launchCwd;
+  }
   delete next.configPath;
   return next;
 }
@@ -281,5 +342,6 @@ module.exports = {
   deepMerge,
   getConfigPath,
   loadConfig,
+  normalizeConfig,
   saveConfig
 };

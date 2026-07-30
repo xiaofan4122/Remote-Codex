@@ -7,7 +7,7 @@ Remote Codex 是一个面向远程使用的 Codex CLI 监控与控制壳。它�
 - Electron 桌面端：显示原生 Codex TUI，保留本地终端交互体验、滚动历史和设置面板。
 - Headless API 服务：在不打开窗口的情况下，通过本地 HTTP API 创建、控制和读取 Codex 会话。
 
-项目同时内置飞书插件，让用户可以在飞书里发送消息控制 Codex，并把 Codex 输出回传到飞书卡片或文本消息。默认远程回复不再解析可视终端屏幕，而是走 Codex `app-server` 事件流，减少 TUI 状态栏、spinner、标题控制序列等噪声进入聊天回复。
+项目同时内置飞书插件，让用户可以在飞书里发送消息控制 Codex，并把 Codex 输出回传到飞书卡片或文本消息。默认远程输入仍驱动 Electron 中同一个 Codex PTY，但普通回复从匹配的 `~/.codex/sessions/**/rollout-*.jsonl` 读取语义事件，不再解析可视终端正文。
 
 ## 启动方式
 
@@ -80,10 +80,13 @@ npm run install:launchers
 脚本 `scripts/install-launchers.sh` 会安装：
 
 - `~/.local/bin/remote-codex`
+- `~/.local/bin/remote-codex-dev`
 - `~/.local/bin/remote-codex-api`
 - `~/.local/share/applications/remote-codex.desktop`
 
-通过这些启动器启动时，会把启动命令所在目录写入 `REMOTE_CODEX_LAUNCH_CWD`，作为默认 Codex 工作目录的候选值。
+通过 `remote-codex` 启动时，会把启动命令所在目录写入
+`REMOTE_CODEX_LAUNCH_CWD`，作为本次 Codex 工作目录。通过
+`remote-codex-dev` 启动时，会使用配置里保存的默认工作目录。
 
 ## 配置方式
 
@@ -105,7 +108,7 @@ npm run install:launchers
 ```json
 {
   "remoteControl": {
-    "responseSource": "app_server"
+    "responseSource": "rollout_jsonl"
   }
 }
 ```
@@ -116,6 +119,7 @@ npm run install:launchers
 - `CODEX_COMMAND`：Codex 可执行文件路径
 - `CODEX_ARGS`：PTY/TUI 启动参数
 - `CODEX_EXEC_ARGS`：`codex exec` JSON 模式参数
+- `REMOTE_CODEX_RESPONSE_SOURCE`：`rollout_jsonl`、`app_server` 或 `exec_json`
 - `CODEX_API_HOST` / `CODEX_API_PORT` / `CODEX_API_TOKEN`
 - `FEISHU_ENABLED`
 - `FEISHU_MODE`
@@ -140,14 +144,15 @@ Electron 主进程入口。负责：
 
 - 创建 BrowserWindow
 - 启动可视 Codex PTY 会话
-- 管理 IPC：启动会话、选择目录、保存配置、飞书连接流程、插件动作
+- 管理 IPC：启动会话、选择目录、保存配置和飞书连接流程
+- 仅在 `REMOTE_CODEX_DIAGNOSTIC_CAPTURE=1` 时记录原生 TUI 诊断数据
 - 初始化 `CodexSessionManager`
 - 初始化 `CodexAppServerRunner`
 - 初始化 `RemoteSessionController`
 - 初始化 `PluginManager`
 - 在窗口加载完成后启动默认 Codex 会话
 
-Electron 模式下，远程控制器通过 `sharedSessionProvider` 可以复用当前可视终端会话；但默认飞书回复源是 `app_server`，因此飞书消息通常不直接驱动可视 TUI。
+Electron 模式下，远程控制器通过 `sharedSessionProvider` 复用当前可视终端会话。默认飞书消息直接驱动这个 TUI，普通回复从其 rollout JSONL 读取。
 
 ### `src/api-server.js`
 
@@ -175,7 +180,17 @@ Codex PTY 会话管理器，基于 `node-pty` 启动 `codex`。每个会话维�
 - 输出 cursor
 - 最近输出 chunk 缓冲
 
-该模块主要服务于 Electron 可视终端、HTTP API 的 `/sessions` 系列端点，以及 `visual_terminal` 远程策略。
+该模块主要服务于 Electron 可视终端、HTTP API 的 `/sessions` 系列端点，以及 `rollout_jsonl` 策略下的输入和原生交互控制。
+
+### `src/codexRolloutReader.js`
+
+普通远程回复的事实源。它先从新追加的 `~/.codex/history.jsonl` 记录取得当前 `session_id`，再定位对应 rollout 文件，并严格校验 prompt、时间、turn 和 cwd。只输出：
+
+- `event_msg.agent_message` 的 `commentary`
+- `event_msg.agent_message` 的 `final_answer`
+- 匹配 turn 的 `task_complete`
+
+`response_item`、工具调用、推理记录和旧 turn 都会被忽略；绑定失败时明确报错，不回退到终端正文。
 
 ### `src/remoteSessionController.js`
 
@@ -185,13 +200,13 @@ Codex PTY 会话管理器，基于 `node-pty` 启动 `codex`。每个会话维�
 - 根据插件和全局配置选择输出源
 - 自动创建会话
 - 校验远程请求的工作目录是否在 `allowedWorkdirs` 内
-- 聚合、节流和格式化输出
+- 串行投递 rollout 进度和最终事件
 - 为飞书等插件创建可更新的回复流
-- 在 `visual_terminal` 模式下清理 TUI 噪声和提取最终回答
+- 解析 `/status`、`/resume`、`/permission` 和审批等原生终端页面
 
 ### `src/codexAppServerRunner.js`
 
-默认远程输出路径。它启动：
+可选的独立结构化输出路径。它启动：
 
 ```text
 codex app-server --listen stdio://
@@ -250,6 +265,14 @@ codex exec resume <threadId> <prompt>
 - 发送普通文本、普通卡片或 CardKit streaming card
 - 处理卡片按钮回调，将 Approve、Deny、Up、Down 等动作转换为远程命令
 - 在卡片或权限调用失败时尝试申请缺失权限，并回退到文本发送
+- 在最终卡片发送前上传本地渲染的公式 PNG，并缓存 `image_key`
+
+### `src/latexRenderer.js`
+
+本地公式渲染边界。它识别代码块之外的块级与行内 LaTeX，延迟初始化
+MathJax 和 resvg-WASM，并输出带固定宽度画布的 PNG。短行内公式会把本地
+字体渲染的正文与 MathJax 公式拼到同一画布；找不到字体、解析失败或栅格化
+失败时由飞书层回退为可读代码块，不发送缺少正文的半成品图片。
 
 ### `src/plugins/feishu/registrationManager.js`
 
@@ -365,38 +388,31 @@ curl http://127.0.0.1:4317/plugins/feishu/connect
 
 ## 当前远程输出策略
 
-### 默认策略：`app_server`
+### 默认策略：`rollout_jsonl`
 
 当前默认配置是：
 
 ```text
-remoteControl.responseSource = app_server
+remoteControl.responseSource = rollout_jsonl
 remoteControl.outputMode = final
+plugins.feishu.singleCardOutput = true
 plugins.feishu.streaming = true
-remoteControl.flushIntervalMs = 250
+plugins.feishu.segmentedOutput = false
 ```
 
 在这个策略下：
 
 1. 飞书收到消息后调用 `RemoteSessionController.handleMessage()`。
-2. 控制器检测到 Feishu 的 `responseSource` 是 `app_server`。
-3. 控制器使用 `CodexAppServerRunner`，启动或复用 `codex app-server --listen stdio://`。
-4. 每个飞书 conversation 对应一个 exec session state，并维护 `threadId`。
-5. prompt 通过 `turn/start` 发给 Codex app-server。
-6. 运行过程中的命令执行、输出 delta、reasoning 状态会被整理为 activity text。
-7. agent message delta 或 completed agent message 会被整理为最终回复。
-8. 如果飞书支持 streaming card，则先创建 CardKit 卡片，过程中 update 卡片内容，结束时关闭 streaming mode；否则发送普通卡片或文本。
+2. 控制器在写 PTY 前启动 `CodexRolloutReader`，从 `history.jsonl` 的新记录绑定当前 session。
+3. prompt 通过 bracketed paste 发送给 Electron 中可见的 Codex TUI。
+4. reader 定位当前 session 的 rollout 文件，并校验 prompt、时间、turn 和 cwd。
+5. commentary 事件按顺序累积更新同一张蓝色处理中卡片。
+6. final_answer 替换该卡正文并将同一张卡切换为绿色完成状态；失败切换为红色。
+7. task_complete 闭合回合；终端重绘、工具输出和重复 response_item 不进入飞书正文。
 
-这个策略的主要目的是真正消费 Codex 的结构化事件，而不是从屏幕文本里猜最终答案。因此它能避免：
+### 可选策略：`app_server`
 
-- spinner 字符
-- TUI 边框
-- 状态栏
-- shell title / OSC 控制序列
-- 终端换行折叠
-- 模型名、cwd、快捷键提示等界面噪声
-
-在 `app_server` 模式下，`/approve`、`/enter`、`/up`、`/down` 这类交互式终端控制不适用。代码会提示 approval 由 JSON 模式策略处理，或者说明该控制命令只适用于可视终端会话。`CodexAppServerRunner` 对 app-server 发来的命令执行和文件变更审批请求默认返回 `denied`。
+将 `responseSource` 设置为 `app_server` 后，控制器使用 `CodexAppServerRunner` 启动或复用 `codex app-server --listen stdio://`。它维护独立 thread，不等同于 Electron 可视 TUI；命令执行和文件变更审批默认返回 `denied`。
 
 ### 兼容策略：`exec_json`
 
@@ -408,36 +424,27 @@ codex exec --json --color never --skip-git-repo-check
 
 它同样解析结构化 JSON 事件，并支持通过 thread id resume。这个路径适合作为 app-server 不可用时的结构化输出备选。
 
-### 兼容策略：`visual_terminal`
+### 默认策略：`rollout_jsonl`
 
-将 `remoteControl.responseSource` 设置为 `visual_terminal` 后，飞书消息会驱动可视终端会话或独立 PTY 会话。
-
-这个模式最接近本地 TUI：
-
-- Electron 模式下可复用当前可视 Codex session
-- prompt 通过 bracketed paste 加回车写入 PTY
-- `/approve`、`/deny`、`/enter`、`/up`、`/down` 等会转换为终端控制键
-- 输出来自 PTY chunk 或渲染层回传的 `visualSnapshot`
-
-该路径有大量清洗逻辑，包括移除 ANSI/OSC 控制序列、过滤 TUI 噪声、识别最终回答 marker、合并 wrapped line、提取 activity。它是 best-effort，因为 Codex TUI 并没有通过终端表面暴露语义化输出流。
+飞书消息驱动当前可视 Codex session，prompt 通过 bracketed paste 写入 PTY，审批和原生页面仍使用终端控制键。普通输出则来自同一 Codex session 的 rollout JSONL：commentary 有序累积更新一个 CardKit 实体，final_answer 替换同一卡片正文，task_complete 闭合回合。旧配置值 `visual_terminal` 和 `pty` 会被规范化为 `rollout_jsonl`，不会重新启用终端正文解析。
 
 ### 输出模式
 
 `remoteControl.outputMode` 和 `plugins.feishu.outputMode` 支持：
 
-- `final`：默认，只回传最终回答或最终整理后的内容
-- `full`：尽量回传完整清理后输出
+- `final`：默认，回传最终回答；飞书单卡模式会在同一卡片内显示 commentary 进度
+- `full`：回传 rollout commentary 和 final_answer 事件
 - `silent`：不主动发送输出
 - `status_only`：保留状态类控制，不发送正文输出
 
-飞书单条文本会按约 3500 字符切分，普通卡片按约 7000 字符切分。streaming card 使用 CardKit 创建卡片实体，再通过 element content update 持续刷新。
+飞书单条文本会按约 3500 字符切分，普通卡片按约 7000 字符切分。默认单卡模式使用 CardKit 创建一个卡片实体，再通过 element content update 持续刷新，并以整卡更新完成收尾。
 
 ## 当前状态判断
 
 从源码和配置看，这个项目当前处于可运行的个人远程控制工具形态：
 
 - Electron TUI、本地 HTTP API、插件系统和飞书 long connection 都已实现。
-- 默认远程输出策略已经切到 `app_server`，重点解决早期从终端屏幕抽取回答不稳定的问题。
-- `visual_terminal` 仍保留，用于需要直接操控可视 Codex TUI、审批提示或键盘选择的场景。
+- 默认远程输出策略是 `rollout_jsonl`：控制同一个可视 TUI，同时从该 session 的 rollout 事件读取普通回复。
+- `app_server` 和 `exec_json` 保留为独立的 headless 结构化路径，不与可视 TUI session 等价。
 - `custom_webhook` 飞书模式只适合出站测试和通知，不是完整远程控制入口。
 - 安全边界主要依赖本地绑定地址、可选 API token、飞书用户/群 allowlist，以及远程 cwd allowlist。

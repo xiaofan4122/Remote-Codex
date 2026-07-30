@@ -6,17 +6,23 @@
     "defaultCwd": ""
   },
   "remoteControl": {
-    "responseSource": "visual_terminal",
-    "rawOutputLogEnabled": false,
-    "rawOutputLogPath": "",
-    "rawOutputLogMaxBytes": 52428800,
-    "rawOutputLogRecordTerminalControls": false
+    "responseSource": "rollout_jsonl"
   },
   "plugins": {
     "feishu": {
       "enabled": false,
+      "singleCardOutput": true,
+      "streaming": true,
+      "segmentedOutput": false,
+      "fileTransferEnabled": true,
+      "fileTransferMaxBytes": 31457280,
+      "fileTransferMaxFiles": 5,
+      "latexRenderingEnabled": true,
+      "latexMaxFormulas": 64,
+      "flushIntervalMs": 100,
+      "finalReplyDebounceMs": 1500,
       "ackReactionEnabled": true,
-      "ackReactionEmoji": "OK",
+      "ackReactionEmoji": "了解",
       "doneReactionEnabled": true,
       "doneReactionEmoji": "DONE"
     }

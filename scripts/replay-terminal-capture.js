@@ -4,15 +4,10 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const {
+  decodeBase64,
   loadCaptureEvents,
   replayCaptureEvents
 } = require('../src/terminalCaptureReplay');
-const {
-  classifyVisualTurnOutput,
-  formatTerminalFinalAnswer,
-  formatVisualProgressSnapshot,
-  formatVisualSnapshot
-} = require('../src/remoteSessionController');
 
 const args = parseArgs(process.argv.slice(2));
 const inputPath = args.inputPath ||
@@ -22,7 +17,7 @@ async function main() {
   const loaded = loadCaptureEvents(inputPath);
   const replay = await replayCaptureEvents(loaded.events, {
     collectFrames: Boolean(args.framesPath || args.parserReportPath),
-    frameMode: args.frameMode,
+    frameMode: args.parserReportPath ? 'all' : args.frameMode,
     verifySnapshots: !args.noVerify
   });
   if (args.framesPath) {
@@ -76,26 +71,36 @@ function buildParserReport(frames) {
   return {
     generatedAt: new Date().toISOString(),
     frames: frames.map((frame) => {
-      const inputText = frame.lastInputText || '';
-      const classified = classifyVisualTurnOutput(frame.viewport, inputText, {
-        colorMarkers: true
-      });
+      const trace = frame.parserTrace || null;
       return {
         sessionId: frame.sessionId,
         sequence: frame.sequence,
         at: frame.at,
         eventType: frame.eventType,
         terminal: frame.terminal,
-        lastInputText: inputText,
-        classified,
-        visualProgress: formatVisualProgressSnapshot(frame.viewport, inputText, {
-          colorMarkers: true
-        }),
-        visualFinal: formatVisualSnapshot(frame.viewport, inputText),
-        terminalFinal: formatTerminalFinalAnswer(frame.scrollback)
+        lastInputText: trace?.input?.text || frame.lastInputText || '',
+        parserTrace: trace
+          ? {
+              source: trace.source || '',
+              reason: trace.reason || '',
+              decision: trace.decision || '',
+              rollout: trace.rollout
+                ? {
+                    ...trace.rollout,
+                    text: decodeTraceBase64(trace.rollout.textBase64)
+                  }
+                : null,
+              signatures: trace.signatures || null,
+              recorded: trace.outputs || null
+            }
+          : null
       };
     })
   };
+}
+
+function decodeTraceBase64(value) {
+  return value ? decodeBase64(value) : '';
 }
 
 function writeJsonl(outputPath, records) {

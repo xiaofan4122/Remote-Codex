@@ -25,8 +25,11 @@ npm run install:launchers
 This installs:
 
 - `remote-codex`: opens the Electron app.
+- `remote-codex-dev`: opens the Electron app with the configured default folder.
 - `remote-codex-api`: starts the headless API server.
 - `Remote Codex`: desktop launcher entry.
+- `remote-codex-send-files`: a Codex skill installed under
+  `${CODEX_HOME:-~/.codex}/skills` for returning generated files to Feishu.
 
 After installing, open the app from your terminal with:
 
@@ -53,9 +56,9 @@ When `remote-codex` is stopped from the terminal with Ctrl-C, it prints the
 matching resume command. If the current Codex status screen exposed a native
 session ID, the hint uses that ID; otherwise it falls back to `--resume --last`.
 
-When launched from a terminal, Remote Codex uses that terminal's current
-directory as the default Codex working directory unless you saved another
-default folder in Settings or set `CODEX_WORKDIR`.
+When launched from a terminal with `remote-codex`, Remote Codex uses that
+terminal's current directory as the Codex working directory. The folder saved in
+Settings is kept for `remote-codex-dev`; `CODEX_WORKDIR` still overrides both.
 
 Or start the background API with:
 
@@ -65,7 +68,8 @@ remote-codex-api
 
 The installer writes launchers to `~/.local/bin`, creates a desktop file under
 `~/.local/share/applications`, and makes sure `~/.local/bin` is available from
-both zsh and bash. If you move this project directory, run the installer again.
+both zsh and bash. It also installs or updates the bundled file-send skill. If
+you move this project directory, run the installer again.
 
 ## Configuration
 
@@ -159,49 +163,78 @@ The Electron window shows the native Codex TUI, so slash commands, approvals,
 keyboard shortcuts, model switching, and other TUI behavior continue to come
 from Codex itself.
 
-Feishu replies default to `visual_terminal`, so remote messages drive the same
-native Codex TUI shown in the Electron window. This preserves slash commands,
-approval prompts, keyboard navigation, and model switching behavior.
-Plain remote text is pasted into the Codex composer and confirmed with Tab, so
-it follows Codex's default queue-message behavior instead of forcing an
-immediate Enter submit.
-When Feishu streaming cards are available, the card is updated with visible
-Codex progress such as `Working`, command runs, file reads, and edits before
-the final reply is shown. Cards use semantic colors for progress, approvals,
-commands, file changes, warnings, and final replies; the local Electron window
-remains the source of the native terminal rendering.
+Feishu replies default to `rollout_jsonl`. Remote messages still drive the same
+native Codex TUI shown in the Electron window, preserving slash commands,
+approval prompts, keyboard navigation, and model switching behavior. Normal
+reply text, however, is read from the matching Codex rollout JSONL instead of
+being reconstructed from the terminal screen.
+Plain remote text is submitted through bracketed paste followed by Enter, using
+the same Codex composer shown in Electron.
+If Codex is already working, another normal remote message is still written to
+the native Codex queue immediately. Remote Codex starts a separate rollout
+observer before the write, then opens that message's card after the preceding
+card closes, preserving response order without the old busy-rejection reply.
+Approval prompts and native picker pages remain blocking controls.
+Feishu remote turns default to one CardKit entity per task. Ordered rollout
+`agent_message` events with `phase=commentary` accumulate in that card while it
+is blue and marked as processing. `phase=final_answer` replaces the body with
+the final answer only, then closes the same card in the green completed state.
+Rollout binding or process failures close that same card in red. Duplicate
+`response_item` records, tool events, historical turns, terminal repaints, and
+resize redraws are not output sources. Set `plugins.feishu.singleCardOutput`
+to `false` only when legacy segmented cards are explicitly required.
+The rollout reader tails appended JSONL records at a short polling interval, so
+commentary can be delivered while Codex is still running. `task_complete`
+closes the turn; visible terminal idle timing does not synthesize a final reply.
 
-If you prefer structured Codex app-server events instead of the visible
-terminal, set `remoteControl.responseSource` to `app_server`. That path avoids
-terminal text extraction, but it does not mirror the visible TUI session.
+Final answers can contain block LaTeX (`\\[...\\]`, `$$...$$`, or a standalone
+`[...]` math block) and inline LaTeX (`\\(...\\)` or `$...$`). Remote Codex
+renders formulas locally with bundled MathJax and resvg-WASM, uploads PNGs to
+Feishu, then closes the card with image components. Short lines containing
+inline formulas are composed as one text-and-formula image so their reading
+order stays intact. Rendering and image keys are cached; failures fall back to
+readable code blocks instead of leaking partial images. The default completed
+card limit is 64 rendered formula regions and can be changed with
+`plugins.feishu.latexMaxFormulas`.
 
-For cleaning-rule debugging, enable an opt-in corpus:
+The installed `remote-codex-send-files` skill lets Codex declare completed
+workspace files in its structured final answer. Remote Codex strips those
+declarations from the card, rejects paths outside the active working directory,
+then uploads valid files through the Feishu app API. The default limits are five
+files per turn and 30 MB per file. File transfer requires `long_connection`;
+custom webhooks cannot upload files.
+
+For an independent headless structured session, set
+`remoteControl.responseSource` to `app_server` or `exec_json`. Those paths do
+not mirror the visible TUI session; `rollout_jsonl` is the structured path that
+keeps the visible PTY as the controlled Codex session.
+
+`~/.codex/history.jsonl` is used only to associate a submitted prompt with its
+Codex session ID. Normal output is then read incrementally from the matching
+`~/.codex/sessions/**/rollout-*.jsonl`. If this binding fails, Remote Codex
+reports an explicit error and does not fall back to terminal text.
+
+Remote Codex does not record PTY input, output, or snapshots during normal
+operation. Normal response history already comes from Codex's official rollout
+JSONL files. For a native `/resume`, `/permission`, approval, resize, or TUI
+rendering bug, start Electron with explicit diagnostic capture:
 
 ```bash
-REMOTE_CODEX_CAPTURE_CLEANING=1 remote-codex
+REMOTE_CODEX_DIAGNOSTIC_CAPTURE=1 npm start
 ```
 
-Samples are written to `~/.local/state/remote-codex/cleaning-corpus.jsonl` by
-default. Use `npm run corpus:cleaning` to extract historical log samples and
-`npm run corpus:replay -- /path/to/corpus.jsonl` to replay the current cleaning
-rules against captured raw/snapshot output.
-
-Remote Codex records a bounded local terminal capture by default:
-
-```bash
-~/.local/state/remote-codex/raw-output.jsonl
-```
-
-The versioned JSONL event stream stores session starts, complete PTY input and
-output bytes, terminal resize events, deduplicated visual/styled snapshots, and
-session exits. It rotates at `50MB` by default. The local file can contain
-prompts, command output, and file contents. Disable it from Settings or set
-`REMOTE_CODEX_RAW_OUTPUT_LOG=0` when local capture is not appropriate.
+The optional capture is written to
+`~/.local/state/remote-codex/raw-output.jsonl`; override it with
+`REMOTE_CODEX_DIAGNOSTIC_CAPTURE_PATH`. It records full terminal controls and
+parser decisions for deterministic native-TUI replay. It can contain prompts,
+command output, and file contents, so leave it disabled outside an active
+diagnostic session.
 
 Replay and verify a capture:
 
 ```bash
 npm run capture:replay -- /path/to/raw-output.jsonl
+npm run capture:replay -- /path/to/raw-output.jsonl --frames /tmp/frames.jsonl --frame-mode all --parser-report /tmp/parser-report.json
 ```
 
 Export a redacted fixture before sharing a capture or committing a parser
@@ -211,22 +244,10 @@ sample:
 npm run capture:export-fixture -- /path/to/raw-output.jsonl /tmp/capture.fixture.jsonl
 ```
 
-The older parser-oriented summary command remains available:
-
-```bash
-npm run rawlog:replay -- /path/to/raw-output.jsonl
-```
-
-The Electron toolbar also includes `Capture Logs`. It opens a structured local
-viewer with session and event-type filters, event counts, a sequence-ordered
-timeline, and content/metadata inspection for PTY bytes, resize events, and
-visual snapshots. The viewer reads the same JSONL fact stream used by replay;
-it does not maintain a separate parser.
-If Codex opens an approval prompt in visual terminal mode, the streaming card
-switches to a waiting-for-confirmation view with the command, reason, and
-visible options. Use the card buttons or send `/approve`, `/always`, or
-`/deny`. For selection-style prompts, `/up`, `/down`, and `/enter` pass through
-the matching terminal keys.
+If Codex opens an approval prompt in visual terminal mode, Remote Codex sends a
+dedicated confirmation card with the command, reason, and visible options. Use
+the card buttons or send `/approve`, `/always`, or `/deny`. For selection-style
+prompts, `/up`, `/down`, and `/enter` pass through the matching terminal keys.
 
 For advanced/manual Feishu setup, configure these in the config file:
 
@@ -236,6 +257,22 @@ For advanced/manual Feishu setup, configure these in the config file:
 - `plugins.feishu.appSecret`
 - `plugins.feishu.allowedOpenIds`
 - `plugins.feishu.allowedChatIds`
+- `plugins.feishu.singleCardOutput`
+- `plugins.feishu.segmentedOutput`
+- `plugins.feishu.streaming`
+- `plugins.feishu.fileTransferEnabled`
+- `plugins.feishu.fileTransferMaxBytes`
+- `plugins.feishu.fileTransferMaxFiles`
+- `plugins.feishu.latexRenderingEnabled`
+- `plugins.feishu.latexMaxFormulas`
+- `plugins.feishu.flushIntervalMs`
+- `plugins.feishu.finalReplyDebounceMs`
+- `plugins.feishu.ackReactionEmoji`: Feishu expects official `emoji_type`
+  values, not arbitrary UI labels. The local aliases `了解` and `收到` map to
+  the official `Get` reaction; invalid custom values fall back to `OK`.
+
+The Electron Settings panel exposes `latexRenderingEnabled` and
+`latexMaxFormulas` directly under Feishu settings.
 
 Remote commands:
 
@@ -243,6 +280,25 @@ Remote commands:
 /start [cwd]
 /stop
 /status
+/resume
+/permission
+/model
+/skills
+/plugins
+/usage
+/mcp [verbose]
+/ps
+/diff
+/review
+/new
+/fork
+/plan [prompt]
+/goal [objective|clear|edit|pause|resume]
+/compact
+/init
+/side [prompt]
+/codex-stop
+/codex-approve
 /tail
 /approve
 /always
@@ -250,10 +306,23 @@ Remote commands:
 /enter
 /up
 /down
+/esc
 /help
 ```
 
-Any other message is sent to the current Codex session.
+Native picker commands update one card while the user navigates. `/diff` uses
+scroll/page controls and `q`-style exit semantics. `/review` switches from the
+native preset picker to the next rollout JSONL task, so terminal repaint text
+never becomes review output. `/compact`, `/init`, `/side`, and `/plan` with an
+inline prompt also bind the next structured rollout task rather than matching
+the literal slash command in history.
+
+Remote `/stop` and `/approve` keep their Remote Codex meanings. Use
+`/codex-stop` for Codex's background-terminal stop command and
+`/codex-approve` for Codex's auto-review retry command. Destructive native
+commands `/archive`, `/delete`, `/logout`, `/exit`, and `/quit` are blocked over
+remote control and must be run locally. Any other message is sent to the current
+Codex session.
 
 ## Headless API
 

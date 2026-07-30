@@ -3,7 +3,8 @@
 const assert = require('node:assert/strict');
 const {
   RemoteSessionController,
-  formatTerminalProgress
+  extractApprovalPrompt,
+  formatApprovalPrompt
 } = require('../src/remoteSessionController');
 const feishuPlugin = require('../src/plugins/feishu');
 
@@ -12,6 +13,9 @@ async function main() {
   testFeishuPermissionPanelShowsOptionsAndControls();
   await testRemoteControlInputBuffer();
   await testFeishuCardActionUpdatesAndDedupes();
+  await testFeishuNativeActionCompletionPatchesOriginalCard();
+  await testFeishuPermissionModeCardActionKeepsPageContext();
+  await testFeishuFollowupPanelAllowsSecondSubmit();
   console.log('Permission card action tests passed.');
 }
 
@@ -20,7 +24,7 @@ function approvalLines(selected = 1) {
     'Running shell command',
     'Would you like to run the following command?',
     'Reason: Need to verify.',
-    '$ npm run smoke:remote-streaming',
+    '$ npm run test:feishu-remote-turn',
     `${selected === 1 ? '>' : ' '} 1. Yes`,
     `${selected === 2 ? '>' : ' '} 2. Yes, always approve`,
     `${selected === 3 ? '>' : ' '} 3. No`
@@ -28,17 +32,19 @@ function approvalLines(selected = 1) {
 }
 
 function testApprovalOptionSelection() {
-  const first = formatTerminalProgress(approvalLines(1));
+  const first = formatApprovalPrompt(extractApprovalPrompt(approvalLines(1).split('\n')));
   assert.match(first, /> 1\. Yes/);
   assert.match(first, /- 2\. Yes, always approve/);
 
-  const second = formatTerminalProgress(approvalLines(2));
+  const second = formatApprovalPrompt(extractApprovalPrompt(approvalLines(2).split('\n')));
   assert.match(second, /- 1\. Yes/);
   assert.match(second, /> 2\. Yes, always approve/);
 }
 
 function testFeishuPermissionPanelShowsOptionsAndControls() {
-  const progressText = formatTerminalProgress(approvalLines(2));
+  const progressText = formatApprovalPrompt(
+    extractApprovalPrompt(approvalLines(2).split('\n'))
+  );
   const card = feishuPlugin.__private.buildPanelCard({
     kind: 'permission',
     title: 'Remote Codex 权限确认',
@@ -132,7 +138,7 @@ async function testRemoteControlInputBuffer() {
       status: 'Running shell command',
       question: 'Would you like to run the following command?',
       reason: 'Reason: Need to verify.',
-      command: '$ npm run smoke:remote-streaming',
+      command: '$ npm run test:feishu-remote-turn',
       options: [
         { index: 1, text: 'Yes', selected: false },
         { index: 2, text: 'Yes, always approve', selected: true },
@@ -201,6 +207,236 @@ async function testFeishuCardActionUpdatesAndDedupes() {
 
   assert.equal(handleCount, 1);
   assert.equal(patchCount, 1);
+}
+
+async function testFeishuNativeActionCompletionPatchesOriginalCard() {
+  let feedbackCount = 0;
+  const patches = [];
+  const sends = [];
+  const plugin = feishuPlugin.create({
+    config: {},
+    pluginConfig: {
+      mode: 'long_connection',
+      streaming: true,
+      appId: 'app',
+      appSecret: 'secret'
+    },
+    services: {
+      remoteController: {
+        async handleMessage(message) {
+          await message.replyPanel({
+            kind: 'native_slash',
+            title: 'Remote Codex /permissions',
+            command: '/permissions',
+            completed: true,
+            notice: '操作已完成。',
+            content: [
+              '**权限模式已更新**',
+              '- 已切换为 `Full Access`。',
+              '- 权限模式已应用。'
+            ].join('\n'),
+            actions: []
+          });
+        }
+      }
+    },
+    logger: {
+      event() {},
+      warn() {}
+    }
+  });
+  plugin.replyStreamsByMessageId.set('om_card', {
+    async showActionFeedback(action, page) {
+      feedbackCount += 1;
+      assert.equal(action, 'permission_full_access');
+      assert.equal(page, '/permissions');
+    }
+  });
+  plugin.client = {
+    im: {
+      v1: {
+        message: {
+          async patch(payload) {
+            patches.push(JSON.parse(payload?.data?.content || '{}'));
+          },
+          async create(payload) {
+            sends.push(payload);
+            return { data: { message_id: 'om_new' } };
+          }
+        }
+      }
+    }
+  };
+
+  await plugin.handleCardAction({
+    action: {
+      value: {
+        remote_codex_action: 'permission_full_access',
+        remote_codex_page: '/permissions'
+      }
+    },
+    context: {
+      open_chat_id: 'oc_chat',
+      open_message_id: 'om_card'
+    },
+    operator: {
+      operator_id: {
+        open_id: 'ou_user'
+      }
+    }
+  });
+
+  assert.equal(feedbackCount, 1);
+  assert.equal(patches.length, 1);
+  assert.equal(sends.length, 0);
+  assert.equal(patches[0].header.template, 'green');
+  const markdown = patches[0].elements.find((element) => element.tag === 'markdown').content;
+  assert.match(markdown, /操作已完成/);
+  assert.match(markdown, /权限模式已更新/);
+  assert.equal(patches[0].elements.some((element) => element.tag === 'action'), false);
+}
+
+async function testFeishuPermissionModeCardActionKeepsPageContext() {
+  const routed = [];
+  const plugin = feishuPlugin.create({
+    config: {},
+    pluginConfig: {
+      mode: 'long_connection',
+      streaming: true,
+      appId: 'app',
+      appSecret: 'secret'
+    },
+    services: {
+      remoteController: {
+        async handleMessage(message) {
+          routed.push({
+            text: message.text,
+            pageContext: message.pageContext,
+            conversationId: message.conversationId,
+            userId: message.userId
+          });
+        }
+      }
+    },
+    logger: {
+      event() {},
+      warn() {}
+    }
+  });
+
+  await plugin.handleCardAction({
+    action: {
+      value: {
+        remote_codex_action: 'permission_full_access',
+        remote_codex_page: '/permissions'
+      }
+    },
+    context: {
+      open_chat_id: 'oc_chat'
+    },
+    operator: {
+      operator_id: {
+        open_id: 'ou_user'
+      }
+    }
+  });
+
+  assert.deepEqual(routed, [
+    {
+      text: '/permission_full_access',
+      pageContext: '/permissions',
+      conversationId: 'oc_chat',
+      userId: 'ou_user'
+    }
+  ]);
+}
+
+async function testFeishuFollowupPanelAllowsSecondSubmit() {
+  const routed = [];
+  const patches = [];
+  const plugin = feishuPlugin.create({
+    config: {},
+    pluginConfig: {
+      mode: 'long_connection',
+      streaming: false,
+      appId: 'app',
+      appSecret: 'secret'
+    },
+    services: {
+      remoteController: {
+        async handleMessage(message) {
+          routed.push(message.text);
+          if (message.text === '/permission_full_access') {
+            await message.replyPanel({
+              kind: 'native_slash',
+              title: 'Remote Codex /permissions 确认',
+              command: '/permissions',
+              active: true,
+              notice: 'Codex 还需要完成下一步选择，当前操作尚未结束。',
+              content: [
+                '**需要继续确认**',
+                '- Enable full access?',
+                '',
+                '**选项**',
+                '> 1. Yes, continue anyway',
+                '- 2. Cancel'
+              ].join('\n'),
+              actions: ['up', 'down', 'enter', 'escape']
+            });
+          }
+        }
+      }
+    },
+    logger: {
+      event() {},
+      warn() {}
+    }
+  });
+  plugin.client = {
+    im: {
+      v1: {
+        message: {
+          async patch(payload) {
+            patches.push(JSON.parse(payload?.data?.content || '{}'));
+          }
+        }
+      }
+    }
+  };
+
+  const event = (remoteAction) => ({
+    action: {
+      value: {
+        remote_codex_action: remoteAction,
+        remote_codex_page: '/permissions'
+      }
+    },
+    context: {
+      open_chat_id: 'oc_chat',
+      open_message_id: 'om_multistage'
+    },
+    operator: {
+      operator_id: {
+        open_id: 'ou_user'
+      }
+    }
+  });
+
+  await plugin.handleCardAction(event('permission_full_access'));
+  await plugin.handleCardAction(event('enter'));
+
+  assert.deepEqual(routed, ['/permission_full_access', '/enter']);
+  const followupCard = patches.find((card) =>
+    card.elements?.some((element) =>
+      element.tag === 'markdown' && /Enable full access\?/.test(element.content)
+    )
+  );
+  assert.ok(followupCard);
+  assert.deepEqual(
+    followupCard.elements.find((element) => element.tag === 'action').actions
+      .map((action) => action.text.content),
+    ['上移', '下移', '确认', '退出']
+  );
 }
 
 function createController() {

@@ -8,18 +8,32 @@ The Feishu plugin supports two modes:
 - `custom_webhook`: group custom robot webhook. This mode is for outbound test
   messages and notifications only.
 
-Remote replies drive the visible local Electron terminal by default, so Feishu
-input appears in the same native Codex TUI that the user sees locally. Set
-`remoteControl.responseSource` to `app_server` only when you prefer structured
-Codex app-server events over the visible terminal.
+Remote input drives the visible local Electron terminal by default, so Feishu
+input appears in the same native Codex TUI that the user sees locally. Normal
+reply text comes from that session's rollout JSONL; terminal text is used only
+for native slash pages, approvals, and local inspection. Set `responseSource`
+to `app_server` or `exec_json` only for an independent headless session.
 Plain Feishu text is pasted into the Codex composer and confirmed with Tab, so
 it uses Codex's queue-message behavior by default.
 
-Streaming cards show visible Codex progress from the TUI, including running
-status, command execution, file reads, and edits, then append the final reply.
-Card body text uses the same RGBA color palette as the bundled xterm Codex
-theme when terminal color metadata is available, and falls back to matching
-Codex theme colors for semantic progress states.
+Single-card CardKit output is the default: rollout commentary events accumulate
+in one blue processing card and the rollout final-answer event replaces its
+body before the same card turns green. Binding and process failures turn the
+same card red. Set `singleCardOutput` to `false` only for the legacy segmented
+card mode.
+The bundled `remote-codex-send-files` skill can declare generated workspace
+files in a structured final answer. Remote Codex removes the declaration from
+the card, validates that the real file remains inside the active Codex working
+directory, and sends it as a Feishu file message. This is available only in
+`long_connection` mode. Files must be non-empty regular files; defaults limit a
+turn to five files and each file to Feishu's 30 MB upload limit. Validation or
+upload failures turn the original completion card orange and add the reason.
+Final-answer LaTeX is rendered locally before the completed card is sent.
+MathJax produces formula SVG, resvg-WASM rasterizes it to a fixed-width PNG,
+and the plugin uploads that PNG for an `image_key`. Block formulas become image
+components. A short line containing inline math is composed from local text
+font segments and formula images on one canvas, so surrounding text is not
+lost. Custom webhooks and failed renders use readable code-block fallbacks.
 Approval prompts are rendered as a waiting-for-confirmation card. The allow,
 always-allow, and reject buttons map to the native Codex prompt keys.
 When Codex exposes selectable approval options, the card lists the concrete
@@ -52,6 +66,14 @@ Advanced config lives under:
       "allowedOpenIds": [],
       "allowedChatIds": [],
       "requireMention": false,
+      "singleCardOutput": true,
+      "streaming": true,
+      "segmentedOutput": false,
+      "fileTransferEnabled": true,
+      "fileTransferMaxBytes": 31457280,
+      "fileTransferMaxFiles": 5,
+      "latexRenderingEnabled": true,
+      "latexMaxFormulas": 64,
       "connectSource": "",
       "connectedAt": "",
       "authorizedOpenId": "",

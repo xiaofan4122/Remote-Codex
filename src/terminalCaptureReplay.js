@@ -75,6 +75,11 @@ async function replayCaptureEvents(events, options = {}) {
       collectReplayFrame(frames, state, event, collectFrames, frameMode);
       continue;
     }
+    if (event.type === 'parser.trace') {
+      state.parserTraces += 1;
+      collectReplayFrame(frames, state, event, collectFrames, frameMode);
+      continue;
+    }
     if (event.type === 'terminal.snapshot') {
       state.snapshots += 1;
       verifySnapshotEvent(state, event, errors, verifySnapshots);
@@ -91,6 +96,7 @@ async function replayCaptureEvents(events, options = {}) {
       outputs: state.outputs,
       resizes: state.resizes,
       exits: state.exits,
+      parserTraces: state.parserTraces,
       snapshots: state.snapshots,
       lastSequence: state.lastSequence,
       lastInputText: state.lastInputText,
@@ -116,6 +122,7 @@ function getReplaySession(sessions, event) {
     outputs: 0,
     resizes: 0,
     exits: 0,
+    parserTraces: 0,
     snapshots: 0,
     lastSequence: 0,
     lastInputText: ''
@@ -137,6 +144,7 @@ function buildReplayFrame(state, event) {
     sequence: Number(event.sequence) || 0,
     at: event.at || '',
     eventType: event.type,
+    parserTrace: event.type === 'parser.trace' ? normalizeParserTraceFrame(event) : null,
     terminal: {
       cols: state.terminal.cols,
       rows: state.terminal.rows
@@ -146,11 +154,34 @@ function buildReplayFrame(state, event) {
       outputs: state.outputs,
       resizes: state.resizes,
       exits: state.exits,
+      parserTraces: state.parserTraces,
       snapshots: state.snapshots
     },
     lastInputText: state.lastInputText,
     viewport: readTerminalViewport(state.terminal),
     scrollback: readTerminalScrollback(state.terminal)
+  };
+}
+
+function normalizeParserTraceFrame(event) {
+  return {
+    traceVersion: event.traceVersion || 0,
+    source: event.source || '',
+    reason: event.reason || '',
+    pluginId: event.pluginId || '',
+    conversationId: event.conversationId || '',
+    remoteKey: event.remoteKey || '',
+    phase: event.phase || '',
+    shared: Boolean(event.shared),
+    nativeCommand: event.nativeCommand || '',
+    rollout: event.rollout || null,
+    input: event.input || null,
+    raw: event.raw || null,
+    visual: event.visual || null,
+    parser: event.parser || null,
+    outputs: event.outputs || null,
+    signatures: event.signatures || null,
+    decision: event.decision || ''
   };
 }
 

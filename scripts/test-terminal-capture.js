@@ -11,7 +11,6 @@ const {
   normalizeTerminalSnapshot
 } = require('../src/rawOutputRecorder');
 const { exportCaptureFixture } = require('../src/terminalCaptureExport');
-const { readCaptureView } = require('../src/terminalCaptureViewer');
 const {
   loadCaptureEvents,
   readTerminalScrollback,
@@ -21,14 +20,35 @@ const {
 
 async function main() {
   await testRecorderTimelineAndSnapshotDedupe();
+  testRecorderCapturesParserTrace();
   testRecorderSkipsTerminalControlsByDefault();
   await testReplayAndSequenceValidation();
   await testReplayFramesAndInputContext();
   testLegacyAndDamagedLogCompatibility();
   testFixtureExportRedactsSecrets();
   testRotation();
-  testCaptureViewerModel();
   console.log('Terminal capture tests passed.');
+}
+
+function testRecorderCapturesParserTrace() {
+  const dir = tempDir();
+  const logPath = path.join(dir, 'capture.jsonl');
+  const recorder = createRecorder(logPath);
+  const session = fakeSession();
+  session.cursor = 7;
+  recorder.recordParserTrace(session, {
+    reason: 'output_flush',
+    raw: { dataBase64: base64('Working repaint'), bytes: 15 },
+    outputs: { segmentText: 'clean text', segmentSections: ['clean text'] },
+    decision: 'send_segment_progress'
+  });
+
+  const loaded = loadCaptureEvents(logPath);
+  assert.equal(loaded.errors.length, 0);
+  assert.equal(loaded.events.length, 1);
+  assert.equal(loaded.events[0].type, 'parser.trace');
+  assert.equal(loaded.events[0].cursor, 7);
+  assert.equal(loaded.events[0].decision, 'send_segment_progress');
 }
 
 async function testRecorderTimelineAndSnapshotDedupe() {
@@ -99,7 +119,13 @@ async function testReplayFramesAndInputContext() {
       previous: { cols: 20, rows: 4 },
       next: { cols: 30, rows: 5 }
     }),
-    captureEvent(5, 'terminal.snapshot', {
+    captureEvent(5, 'parser.trace', {
+      input: { text: 'explain bug', textBase64: base64('explain bug') },
+      raw: { dataBase64: base64('• answer line'), bytes: 15 },
+      outputs: { segmentText: 'answer line', segmentSections: ['answer line'] },
+      decision: 'send_segment_progress'
+    }),
+    captureEvent(6, 'terminal.snapshot', {
       snapshot: {
         viewport: 'answer line',
         scrollback: 'answer line'
@@ -113,6 +139,7 @@ async function testReplayFramesAndInputContext() {
   );
   assert.equal(snapshotReplay.frames[0].lastInputText, 'explain bug');
   assert.deepEqual(snapshotReplay.frames[0].terminal, { cols: 30, rows: 5 });
+  assert.equal(snapshotReplay.sessions[0].parserTraces, 1);
 
   const fullReplay = await replayCaptureEvents(events, {
     collectFrames: true,
@@ -121,8 +148,9 @@ async function testReplayFramesAndInputContext() {
   });
   assert.deepEqual(
     fullReplay.frames.map((frame) => frame.eventType),
-    ['pty.input', 'pty.output', 'terminal.resize', 'terminal.snapshot']
+    ['pty.input', 'pty.output', 'terminal.resize', 'parser.trace', 'terminal.snapshot']
   );
+  assert.equal(fullReplay.frames[3].parserTrace.decision, 'send_segment_progress');
 }
 
 function testLegacyAndDamagedLogCompatibility() {
@@ -146,13 +174,19 @@ function testFixtureExportRedactsSecrets() {
   const outputPath = path.join(dir, 'fixture.jsonl');
   fs.writeFileSync(inputPath, `${JSON.stringify(captureEvent(1, 'pty.output', {
     dataBase64: base64('token=secret-value Bearer abc.def.ghi'),
-    preview: 'token=secret-value'
+    preview: 'token=secret-value',
+    visual: {
+      snapshotBase64: base64('authorization: token-secret')
+    }
   }))}\n`);
   exportCaptureFixture(inputPath, outputPath);
   const fixture = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
   const decoded = Buffer.from(fixture.dataBase64, 'base64').toString('utf8');
+  const decodedSnapshot = Buffer.from(fixture.visual.snapshotBase64, 'base64').toString('utf8');
   assert.doesNotMatch(decoded, /secret-value|abc\.def\.ghi/);
+  assert.doesNotMatch(decodedSnapshot, /token-secret/);
   assert.match(decoded, /\[REDACTED\]/);
+  assert.match(decodedSnapshot, /\[REDACTED\]/);
   assert.equal(fixture.redacted, true);
 }
 
@@ -199,66 +233,6 @@ function testRecorderSkipsTerminalControlsByDefault() {
     [1, 2, 3]
   );
   assert.equal(Buffer.from(loaded.events[1].dataBase64, 'base64').toString('utf8'), 'ok\r\n');
-}
-
-function testCaptureViewerModel() {
-  const dir = tempDir();
-  const missing = readCaptureView(path.join(dir, 'missing.jsonl'));
-  assert.equal(missing.exists, false);
-  assert.deepEqual(missing.events, []);
-
-  const logPath = path.join(dir, 'viewer.jsonl');
-  const snapshot = {
-    viewport: 'visible panel',
-    scrollback: 'history\nvisible panel'
-  };
-  fs.writeFileSync(logPath, [
-    JSON.stringify(captureEvent(1, 'session.start', { command: 'codex', args: ['--no-alt-screen'] })),
-    JSON.stringify(captureEvent(2, 'pty.output', { dataBase64: base64('hello\r\n'), bytes: 7 })),
-    JSON.stringify(captureEvent(3, 'terminal.snapshot', {
-      hash: hashJson(normalizeTerminalSnapshot(snapshot)),
-      snapshot
-    }))
-  ].join('\n'));
-  const view = readCaptureView(logPath, { limit: 2 });
-  assert.equal(view.exists, true);
-  assert.equal(view.totalEvents, 3);
-  assert.equal(view.matchedEvents, 3);
-  assert.equal(view.truncated, true);
-  assert.equal(view.sessions[0].events, 3);
-  assert.equal(view.typeCounts['pty.output'], 1);
-  assert.deepEqual(view.events.map((event) => event.sequence), [2, 3]);
-  assert.match(view.events[0].content, /## Readable text\nhello/);
-  assert.match(view.events[0].content, /## Raw terminal bytes\nhello\\r\\n/);
-  assert.match(view.events[1].content, /## Viewport\nvisible panel/);
-
-  fs.appendFileSync(logPath, `\n${JSON.stringify(captureEvent(4, 'pty.output', {
-    dataBase64: base64('\x1b[?2026h\x1b[9;2H\x1b[K'),
-    bytes: 18
-  }))}`);
-  const filtered = readCaptureView(logPath, { limit: 10 });
-  assert.equal(filtered.hiddenNoiseEvents, 1);
-  assert.deepEqual(filtered.events.map((event) => event.sequence), [1, 2, 3]);
-  const raw = readCaptureView(logPath, { limit: 10, includeNoise: true });
-  assert.equal(raw.hiddenNoiseEvents, 0);
-  assert.equal(raw.events.at(-1).noise, true);
-  assert.equal(raw.events.at(-1).preview, '[terminal repaint/control sequence]');
-  assert.match(raw.events.at(-1).content, /\\x1b\[\?2026h/);
-
-  fs.appendFileSync(logPath, `\n${JSON.stringify(captureEvent(5, 'pty.output', {
-    dataBase64: base64('ps'),
-    bytes: 2
-  }))}`);
-  assert.equal(readCaptureView(logPath, { limit: 10 }).hiddenNoiseEvents, 1);
-
-  fs.appendFileSync(logPath, `\n${JSON.stringify(captureEvent(6, 'pty.input', {
-    dataBase64: base64('\x1b[?1;2c'),
-    bytes: 7
-  }))}`);
-  fs.appendFileSync(logPath, `\n${JSON.stringify(captureEvent(7, 'terminal.snapshot', {
-    snapshot: { viewport: '', scrollback: '' }
-  }))}`);
-  assert.equal(readCaptureView(logPath, { limit: 10 }).hiddenNoiseEvents, 3);
 }
 
 function createRecorder(logPath, options = {}) {

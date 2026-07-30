@@ -3,6 +3,8 @@
 const assert = require('node:assert/strict');
 const {
   RemoteSessionController,
+  extractNativeChoicePrompt,
+  formatNativeChoicePrompt,
   formatNativeSlashOutput,
   isCompleteStatusSlashOutput
 } = require('../src/remoteSessionController');
@@ -13,15 +15,26 @@ async function main() {
   testResumeRowsOutput();
   testResumeDisabledOutput();
   testPermissionsPickerOutput();
+  testPermissionsPickerOutputWithCurrentCodexLabels();
+  testFullAccessConfirmationOutput();
   testPermissionsLoadingDoesNotLeakPreviousAnswer();
+  testGenericModelPickerOutput();
+  testGenericSkillsPickerOutput();
+  testGenericMcpReportOutput();
+  testGenericDiffViewerOutput();
+  testGenericImmediateErrorOutput();
+  testGenericSessionCommandCompletion();
   testStatusOutput();
   testStatusOutputFiltersUsageLinkAndColorsQuotaLevels();
   testStatusOutputWithoutQuotaCanBeComplete();
   testPartialStatusOutputIsNotComplete();
   testFeishuResumeButtons();
   testFeishuPermissionsButtons();
+  testFeishuDefaultStreamHasNoButtons();
   testFeishuStatusHasNoButtons();
+  testFeishuViewerButtons();
   testFeishuNativeSlashPanelCard();
+  testFeishuNativeSlashCompletedPanelCard();
   testFeishuResumeActionFeedback();
   await testNativeSlashControlModes();
   await testNativeSlashStaticPanelFallback();
@@ -117,11 +130,80 @@ function testPermissionsPickerOutput() {
 
   assert.match(output, /^\*\*权限模式\*\*/);
   assert.match(output, /当前模式: `Default`/);
-  assert.match(output, /点击下方模式按钮会立即应用/);
+  assert.match(output, /如果 Codex 显示安全确认，将继续在当前卡片中完成/);
   assert.match(output, /> 1\. Default \(current\)/);
+  assert.match(output, /Approval is required to access the internet or edit other files\./);
   assert.match(output, /- 2\. Auto-review/);
+  assert.match(output, /through the auto-reviewer subagent\./);
   assert.match(output, /- 3\. Full Access/);
+  assert.match(output, /approval\. Exercise caution when using\./);
   assert.doesNotMatch(output, /点击上移\/下移切换选项/);
+}
+
+function testFullAccessConfirmationOutput() {
+  const prompt = extractNativeChoicePrompt([
+    'Enable full access?',
+    'When Codex runs with full access, it can edit any file on your computer and run commands with network, without your',
+    'approval. Exercise caution when enabling full access. This significantly increases the risk of data loss, leaks, or',
+    'unexpected behavior.',
+    '› 1. Yes, continue anyway  Apply full access for this session',
+    '  2. Cancel                Go back without enabling full access'
+  ]);
+
+  assert.ok(prompt);
+  assert.equal(prompt.question, 'Enable full access?');
+  assert.equal(prompt.options.length, 2);
+  assert.equal(prompt.options[0].selected, true);
+  assert.equal(prompt.options[1].text, 'Cancel Go back without enabling full access');
+
+  assert.equal(
+    formatNativeChoicePrompt(prompt),
+    [
+      '**需要继续确认**',
+      '- Enable full access?',
+      '',
+      'When Codex runs with full access, it can edit any file on your computer and run commands with network, without your approval. Exercise caution when enabling full access. This significantly increases the risk of data loss, leaks, or unexpected behavior.',
+      '',
+      '**选项**',
+      '> 1. Yes, continue anyway Apply full access for this session',
+      '- 2. Cancel Go back without enabling full access',
+      '',
+      '使用上移/下移切换选择，再点击确认；点击退出会取消当前操作。'
+    ].join('\n')
+  );
+
+  assert.equal(
+    extractNativeChoicePrompt([
+      'Enable full access?',
+      '› 1. Yes, continue anyway',
+      '  2. Cancel',
+      '› Review the next task'
+    ]),
+    null
+  );
+}
+
+function testPermissionsPickerOutputWithCurrentCodexLabels() {
+  const output = formatNativeSlashOutput({
+    command: '/permissions',
+    snapshot: [
+      'Update Model Permissions',
+      '> 1. Ask for approval (current)  Codex can read and edit files in the current workspace, and run commands. Approval is',
+      '                                 required to access the internet or edit other files.',
+      '  2. Approve for me              Only ask for actions detected as potentially unsafe.',
+      '  3. Full Access                 Codex can edit files outside this workspace and access the internet without asking',
+      '                                 for approval. Exercise caution when using.',
+      'Press enter to confirm or esc to go back'
+    ].join('\n')
+  });
+
+  assert.match(output, /^\*\*权限模式\*\*/);
+  assert.match(output, /当前模式: `Ask for approval`/);
+  assert.match(output, /> 1\. Ask for approval \(current\)/);
+  assert.match(output, /required to access the internet or edit other files\./);
+  assert.match(output, /- 2\. Approve for me/);
+  assert.match(output, /- 3\. Full Access/);
+  assert.match(output, /for approval\. Exercise caution when using\./);
 }
 
 function testPermissionsLoadingDoesNotLeakPreviousAnswer() {
@@ -137,9 +219,141 @@ function testPermissionsLoadingDoesNotLeakPreviousAnswer() {
 
   assert.equal(
     output,
-    '**权限模式**\n- 正在读取当前权限模式。\n- 可直接选择 Default、Auto-review 或 Full Access。'
+    '**权限模式**\n- 正在读取当前权限模式。\n- 可直接选择 Ask for approval、Approve for me 或 Full Access。'
   );
   assert.doesNotMatch(output, /22e539d|origin|已提交并推送/);
+}
+
+function testGenericModelPickerOutput() {
+  const output = formatNativeSlashOutput({
+    command: '/model',
+    snapshot: [
+      '>_ OpenAI Codex (v0.146.0)',
+      'model: gpt-5.6-sol xhigh fast /model to change',
+      'directory: /tmp/project',
+      'Tip: Switch models quickly with /model.',
+      'Select Model and Effort',
+      'Access legacy models from config.toml',
+      '› 1. gpt-5.6-sol (current)  Latest frontier model.',
+      '  2. gpt-5.6-terra          Balanced model.',
+      '  3. gpt-5.6-luna           Fast model.',
+      'Press enter to confirm or esc to go back'
+    ].join('\n')
+  });
+
+  assert.match(output, /^\*\*\/model\*\*/);
+  assert.match(output, /Select Model and Effort/);
+  assert.match(output, /> 1\. gpt-5\.6-sol \(current\)/);
+  assert.match(output, /- 3\. gpt-5\.6-luna/);
+  assert.doesNotMatch(output, /OpenAI Codex|directory:|Tip:/);
+}
+
+function testGenericSkillsPickerOutput() {
+  const output = formatNativeSlashOutput({
+    command: '/skills',
+    snapshot: [
+      'Tip: Start a fresh idea with /new.',
+      'Skills',
+      'Choose an action',
+      '› 1. List skills            Tip: press @ to open this list directly.',
+      '  2. Enable/Disable Skills  Enable or disable skills.',
+      'Press enter to confirm or esc to go back'
+    ].join('\n')
+  });
+
+  assert.match(output, /^\*\*\/skills\*\*/);
+  assert.match(output, /Skills Choose an action/);
+  assert.match(output, /> 1\. List skills/);
+  assert.match(output, /- 2\. Enable\/Disable Skills/);
+}
+
+function testGenericMcpReportOutput() {
+  const output = formatNativeSlashOutput({
+    command: '/mcp',
+    snapshot: [
+      'Tip: Resume a previous conversation with codex resume.',
+      '/mcp',
+      'MCP Tools',
+      '  • codex_apps',
+      '    • Auth: Bearer token',
+      '    • Tools: tool.one, tool.two',
+      '› Explain this codebase',
+      'gpt-5.6-sol xhigh fast · /tmp/project'
+    ].join('\n')
+  });
+
+  assert.equal(
+    output,
+    [
+      '**/mcp**',
+      '- MCP Tools',
+      '- codex_apps',
+      '- Auth: Bearer token',
+      '- Tools: tool.one, tool.two'
+    ].join('\n')
+  );
+}
+
+function testGenericDiffViewerOutput() {
+  const output = formatNativeSlashOutput({
+    command: '/diff',
+    snapshot: [
+      '/ D I F F / / / /',
+      'diff --git a/a.js b/a.js',
+      '--- a/a.js',
+      '+++ b/a.js',
+      '+const value = 1;',
+      '──────── 25% ────────',
+      '↑/↓ to scroll   pgup/pgdn to page   home/end to jump',
+      'q to quit'
+    ].join('\n')
+  });
+
+  assert.match(output, /^\*\*\/diff\*\*/);
+  assert.match(output, /```diff/);
+  assert.match(output, /\+const value = 1;/);
+  assert.doesNotMatch(output, /q to quit|25%/);
+}
+
+function testGenericImmediateErrorOutput() {
+  const output = formatNativeSlashOutput({
+    command: '/personality',
+    snapshot: [
+      'Tip: You can resume a previous conversation.',
+      "■ Current model doesn't support personalities. Try /model.",
+      '› Use /skills to list available skills',
+      'gpt-5.6-sol xhigh fast · /tmp/project'
+    ].join('\n')
+  });
+
+  assert.equal(
+    output,
+    "**/personality**\n- Current model doesn't support personalities. Try /model."
+  );
+}
+
+function testGenericSessionCommandCompletion() {
+  const output = formatNativeSlashOutput({
+    command: '/new',
+    snapshot: [
+      '>_ OpenAI Codex (v0.146.0)',
+      'Tip: New chat created.',
+      '› Run /review on my current changes',
+      'gpt-5.6-sol xhigh fast · /tmp/project'
+    ].join('\n')
+  });
+  assert.equal(output, '**/new**\n- Codex 已执行该命令并返回输入界面。');
+
+  const loading = formatNativeSlashOutput({
+    command: '/new',
+    snapshot: [
+      'Tip: Enable docs MCP at',
+      'https://developers.openai.com/mcp.',
+      '• Booting MCP server: codex_apps (0s • esc to interrupt)',
+      '› Improve documentation in @filename'
+    ].join('\n')
+  });
+  assert.equal(loading, '**/new**\n- Codex 正在完成命令后的初始化，请稍候。');
 }
 
 function testStatusOutput() {
@@ -247,7 +461,7 @@ function testFeishuPermissionsButtons() {
 
   assert.deepEqual(
     actions.map((action) => action.text.content),
-    ['Default', 'Auto-review', 'Full Access']
+    ['Ask for approval', 'Approve for me', 'Full Access']
   );
   assert.deepEqual(
     actions.map((action) => action.value.remote_codex_page),
@@ -259,6 +473,15 @@ function testFeishuPermissionsButtons() {
   );
 }
 
+function testFeishuDefaultStreamHasNoButtons() {
+  const card = feishuPlugin.__private.buildStreamingCard({
+    title: 'Remote Codex',
+    initialText: 'Generating...',
+    controlMode: 'default'
+  });
+  assert.equal(card.body.elements.some((element) => element.tag === 'action'), false);
+}
+
 function testFeishuStatusHasNoButtons() {
   const card = feishuPlugin.__private.buildStreamingCard({
     title: 'Remote Codex /status',
@@ -266,6 +489,22 @@ function testFeishuStatusHasNoButtons() {
     controlMode: 'status'
   });
   assert.equal(card.body.elements.some((element) => element.tag === 'action'), false);
+}
+
+function testFeishuViewerButtons() {
+  const card = feishuPlugin.__private.buildPanelCard({
+    kind: 'native_slash',
+    title: 'Remote Codex /diff',
+    command: '/diff',
+    active: true,
+    content: '**/diff**\n```diff\n+line\n```',
+    actions: ['up', 'down', 'page_up', 'page_down', 'viewer_exit']
+  });
+  const actions = card.elements.find((element) => element.tag === 'action').actions;
+  assert.deepEqual(
+    actions.map((action) => action.text.content),
+    ['上移', '下移', '上一页', '下一页', '退出']
+  );
 }
 
 function testFeishuNativeSlashPanelCard() {
@@ -296,6 +535,29 @@ function testFeishuNativeSlashPanelCard() {
   assert.equal(card.header.title.content, 'Remote Codex /resume');
 }
 
+function testFeishuNativeSlashCompletedPanelCard() {
+  const card = feishuPlugin.__private.buildPanelCard({
+    kind: 'native_slash',
+    title: 'Remote Codex /resume',
+    command: '/resume',
+    completed: true,
+    notice: '操作已完成。',
+    content: [
+      '**会话已恢复**',
+      '- Codex 已离开 `/resume` 选择页，并切换到所选历史会话。',
+      '- 现在可以继续发送新的任务。'
+    ].join('\n'),
+    actions: []
+  });
+  const markdown = card.elements.find((element) => element.tag === 'markdown').content;
+
+  assert.equal(card.header.template, 'green');
+  assert.equal(card.elements.some((element) => element.tag === 'action'), false);
+  assert.match(markdown, /操作已完成/);
+  assert.match(markdown, /会话已恢复/);
+  assert.match(markdown, /现在可以继续发送新的任务/);
+}
+
 function testFeishuResumeActionFeedback() {
   const resumeCard = feishuPlugin.__private.buildActionStateCard({
     action: 'enter',
@@ -323,6 +585,8 @@ async function testNativeSlashControlModes() {
   assert.equal(await captureControlMode(controller, '/resume'), 'resume');
   assert.equal(await captureControlMode(controller, '/permissions'), 'permissions');
   assert.equal(await captureControlMode(controller, '/status'), 'status');
+  assert.equal(await captureControlMode(controller, '/diff'), 'viewer');
+  assert.equal(await captureControlMode(controller, '/model'), 'slash');
 }
 
 async function testNativeSlashStaticPanelFallback() {
