@@ -17,6 +17,7 @@ const {
 } = require('../src/linuxTarUpdater');
 
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-codex-app-updates-'));
+const fixtureArchitecture = ['x64', 'arm64'].includes(process.arch) ? process.arch : 'x64';
 
 async function run() {
   await testManualUpdateLifecycle();
@@ -93,14 +94,15 @@ function testInstallModeDetection() {
 async function testManagedTarUpdate() {
   const home = path.join(fixtureRoot, 'home');
   const installRoot = path.join(home, '.local', 'opt', 'remote-codex');
-  const releaseDirectory = path.join(installRoot, 'releases', '1.2.3-x64-deadbeef');
+  const releaseId = `1.2.3-${fixtureArchitecture}-deadbeef`;
+  const releaseDirectory = path.join(installRoot, 'releases', releaseId);
   const executable = path.join(releaseDirectory, 'remote-codex');
   const resourcesPath = path.join(releaseDirectory, 'resources');
   const userData = path.join(home, '.config', 'remote-codex');
   fs.mkdirSync(path.join(resourcesPath, 'install'), { recursive: true });
   fs.writeFileSync(executable, '#!/bin/sh\n');
   fs.chmodSync(executable, 0o755);
-  fs.symlinkSync('releases/1.2.3-x64-deadbeef', path.join(installRoot, 'current'));
+  fs.symlinkSync(`releases/${releaseId}`, path.join(installRoot, 'current'));
   fs.writeFileSync(path.join(resourcesPath, 'install', 'install-linux.sh'), '#!/bin/sh\n');
 
   const installation = findManagedTarInstallation({ execPath: executable, homedir: home });
@@ -132,7 +134,9 @@ async function testManagedTarUpdate() {
     fetchText: async (url) => {
       calls.urls.push(url);
       if (url.endsWith('remote-codex-version.txt')) return '1.3.0\n';
-      if (url.endsWith('.sha256')) return `${checksum}  remote-codex-linux-x64.tar.gz\n`;
+      if (url.endsWith('.sha256')) {
+        return `${checksum}  remote-codex-linux-${fixtureArchitecture}.tar.gz\n`;
+      }
       throw new Error(`Unexpected URL: ${url}`);
     },
     downloadFile: async (url, destination, options) => {
@@ -154,7 +158,8 @@ async function testManagedTarUpdate() {
   const downloaded = await updater.downloadUpdate();
   assert.equal(downloaded.length, 1);
   assert.ok(calls.urls.some((url) => url.includes('/releases/download/v1.3.0/')));
-  assert.equal(parseChecksum(`${checksum}  remote-codex-linux-x64.tar.gz`, 'remote-codex-linux-x64.tar.gz'), checksum);
+  const asset = `remote-codex-linux-${fixtureArchitecture}.tar.gz`;
+  assert.equal(parseChecksum(`${checksum}  ${asset}`, asset), checksum);
 
   assert.equal(updater.quitAndInstall(false, true), true);
   assert.equal(calls.installs.length, 1);
