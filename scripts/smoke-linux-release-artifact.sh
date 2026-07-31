@@ -65,7 +65,7 @@ REMOTE_CODEX_SMOKE_LDD_OUTPUT="$(ldd "${REMOTE_CODEX_SMOKE_PTY_MODULE}")" || {
   printf 'Packaged node-pty is not a valid dynamic Linux module.\n' >&2
   exit 1
 }
-if printf '%s\n' "${REMOTE_CODEX_SMOKE_LDD_OUTPUT}" | rg -q 'not found'; then
+if printf '%s\n' "${REMOTE_CODEX_SMOKE_LDD_OUTPUT}" | grep -q 'not found'; then
   printf 'Packaged node-pty has unresolved shared libraries.\n' >&2
   exit 1
 fi
@@ -80,9 +80,9 @@ dpkg-deb -x "${REMOTE_CODEX_SMOKE_DEB}" "${REMOTE_CODEX_SMOKE_DEB_ROOT}"
 REMOTE_CODEX_SMOKE_DEB_RESOURCES="${REMOTE_CODEX_SMOKE_DEB_ROOT}/opt/Remote Codex/resources"
 test "$(tr -d '[:space:]' < "${REMOTE_CODEX_SMOKE_DEB_RESOURCES}/package-type")" = deb
 test -x "${REMOTE_CODEX_SMOKE_DEB_RESOURCES}/install/install-linux.sh"
-rg -q '^provider: github$' "${REMOTE_CODEX_SMOKE_DEB_RESOURCES}/app-update.yml"
-rg -q "^version: ${REMOTE_CODEX_SMOKE_VERSION}$" "${REMOTE_CODEX_SMOKE_METADATA}"
-rg -q "remote-codex-linux-${REMOTE_CODEX_SMOKE_DEB_ARCH}\\.deb" "${REMOTE_CODEX_SMOKE_METADATA}"
+grep -q '^provider: github$' "${REMOTE_CODEX_SMOKE_DEB_RESOURCES}/app-update.yml"
+grep -q "^version: ${REMOTE_CODEX_SMOKE_VERSION}$" "${REMOTE_CODEX_SMOKE_METADATA}"
+grep -q "remote-codex-linux-${REMOTE_CODEX_SMOKE_DEB_ARCH}\\.deb" "${REMOTE_CODEX_SMOKE_METADATA}"
 
 env \
   HOME="${REMOTE_CODEX_SMOKE_HOME}" \
