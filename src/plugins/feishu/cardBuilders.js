@@ -594,7 +594,7 @@ function buildControlButton(label, action, type, options = {}) {
 function buildV2ButtonColumns(actions, idPrefix) {
   return {
     tag: 'column_set',
-    flex_mode: 'none',
+    flex_mode: 'flow',
     background_style: 'default',
     horizontal_spacing: 'medium',
     margin: '12px 0 0 0',

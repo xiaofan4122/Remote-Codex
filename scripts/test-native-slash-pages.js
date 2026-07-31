@@ -458,7 +458,9 @@ function testFeishuPermissionsButtons() {
     controlMode: 'permissions'
   });
   const actions = streamingCardButtons(card);
+  const columns = card.body.elements.find((element) => element.tag === 'column_set');
 
+  assert.equal(columns.flex_mode, 'flow');
   assert.deepEqual(
     actions.map((action) => action.text.content),
     ['Ask for approval', 'Approve for me', 'Full Access']

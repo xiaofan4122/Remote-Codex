@@ -468,9 +468,10 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
     approvalActions.map((action) => buttonCallbackValue(action).remote_codex_action),
     ['approve', 'approve_persistent', 'deny']
   );
-  const approvalColumns = approvalCard.body.elements
-    .find((element) => element.tag === 'column_set')
-    .columns;
+  const approvalColumnSet = approvalCard.body.elements
+    .find((element) => element.tag === 'column_set');
+  const approvalColumns = approvalColumnSet.columns;
+  assert.equal(approvalColumnSet.flex_mode, 'flow');
   assert.deepEqual(
     approvalColumns.map((column) => [column.width, column.weight]),
     [['weighted', 1], ['weighted', 1], ['weighted', 1]]
@@ -548,15 +549,6 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
   );
   await waitUntil(() => harness.rolloutReader.turns.length === 2);
   assert.match(harness.session.writes.at(-1), /授权后立即追加的任务/);
-
-  const replacement = new Error(
-    'A new rollout task started before the bound task completed.'
-  );
-  replacement.code = 'CODEX_ROLLOUT_TURN_REPLACED';
-  replacement.turnId = 'turn-approval';
-  replacement.nextTurnId = 'turn-after-approval';
-  firstTurn.fail(replacement);
-
   await waitUntil(() => harness.closes.length === 1);
   await waitUntil(() => harness.cardCreates.length === 2);
   const handoffCard = parseClosedStreamingCard(harness.closes[0]);

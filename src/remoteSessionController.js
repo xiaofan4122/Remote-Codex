@@ -272,7 +272,7 @@ class RemoteSessionController {
             sessionId: state.session?.id || '',
             promptChars: text.length
           });
-          this.queueRemoteMessage(state, message, text);
+          await this.queueRemoteMessage(state, message, text);
           return;
         }
         if (
@@ -301,7 +301,7 @@ class RemoteSessionController {
         await message.reply('当前正在操作 Codex 原生页面，请先完成或退出该页面。');
         return;
       }
-      this.queueRemoteMessage(state, message, text);
+      await this.queueRemoteMessage(state, message, text);
       return;
     }
 
@@ -363,7 +363,7 @@ class RemoteSessionController {
     return true;
   }
 
-  queueRemoteMessage(state, message, text) {
+  async queueRemoteMessage(state, message, text) {
     if (!state || !message || !text) return null;
     if (!Array.isArray(state.queuedMessages)) state.queuedMessages = [];
     const submittedAt = Date.now();
@@ -430,6 +430,11 @@ class RemoteSessionController {
       queueLength: state.queuedMessages.length,
       promptChars: text.length
     });
+    if (!state.rolloutFinished) {
+      await this.handoffRolloutForQueuedMessage(state, {
+        reason: 'user_message_queued'
+      });
+    }
     return queued;
   }
 
@@ -551,7 +556,11 @@ class RemoteSessionController {
           Array.isArray(state.queuedMessages) &&
           state.queuedMessages.length > 0
         ) {
-          await this.completeReplacedRolloutForQueuedMessage(state, error);
+          await this.handoffRolloutForQueuedMessage(state, {
+            reason: 'rollout_turn_replaced',
+            turnId: error?.turnId,
+            nextTurnId: error?.nextTurnId
+          });
           return;
         }
         state.rolloutFailed = true;
@@ -582,7 +591,7 @@ class RemoteSessionController {
     return state.rolloutEventChain;
   }
 
-  async completeReplacedRolloutForQueuedMessage(state, error) {
+  async handoffRolloutForQueuedMessage(state, details = {}) {
     const previousText = String(
       state.rolloutProgressText || state.lastStreamText || ''
     ).trim();
@@ -597,8 +606,9 @@ class RemoteSessionController {
       conversationId: state.conversationId,
       sessionId: state.session?.id || '',
       rolloutSessionId: state.rolloutSessionId || '',
-      rolloutTurnId: error?.turnId || state.rolloutTurnId || '',
-      nextRolloutTurnId: error?.nextTurnId || '',
+      rolloutTurnId: details.turnId || state.rolloutTurnId || '',
+      nextRolloutTurnId: details.nextTurnId || '',
+      reason: details.reason || 'queued_message',
       queueLength: state.queuedMessages.length
     });
     this.recordParserTrace(state, {
@@ -1665,21 +1675,22 @@ class RemoteSessionController {
       this.beginNativePickerTaskRollout(state);
     }
 
+    const submitsNativePage =
+      state.nativeCommand &&
+      (
+        ['enter', 'escape', 'viewer_exit'].includes(String(action || '').toLowerCase()) ||
+        isPermissionModeControlAction(action)
+      );
+    if (submitsNativePage) {
+      this.beginNativePageAction(state, action);
+    }
+
     await writeNativeControlInput(state, action, input);
     if (
       state.nativeCommand &&
       ['up', 'down', 'page_up', 'page_down', 'home', 'end', 'left', 'right', 'tab'].includes(String(action || '').toLowerCase())
     ) {
       state.nativePanelUpdateRequested = true;
-    }
-    if (
-      state.nativeCommand &&
-      (
-        ['enter', 'escape', 'viewer_exit'].includes(String(action || '').toLowerCase()) ||
-        isPermissionModeControlAction(action)
-      )
-    ) {
-      this.beginNativePageAction(state, action);
     }
     this.refreshSessionPhase(state, 'control_sent');
     if (approvalAction) {
@@ -2150,9 +2161,9 @@ class RemoteSessionController {
       chars: String(text || '').length,
       text: clipForLog(text, 800)
     });
-    state.replyStream
-      ?.[updateMethod](text)
-      .catch((error) => {
+    const updateStream = state.replyStream?.[updateMethod];
+    if (typeof updateStream === 'function') {
+      Promise.resolve(updateStream.call(state.replyStream, text)).catch((error) => {
         this.logger.warn?.('Remote reply stream update failed', remoteErrorLogMeta(error, {
           pluginId: state.pluginId,
           conversationId: state.conversationId,
@@ -2171,6 +2182,7 @@ class RemoteSessionController {
           });
         }
       });
+    }
 
     if (state.streamFinishTimer) {
       clearTimeout(state.streamFinishTimer);
@@ -2429,6 +2441,25 @@ class RemoteSessionController {
     }
   }
 
+  async presentNativePagePanel(state, panel, fallbackText) {
+    if (typeof state.replyStream?.showPanel === 'function') {
+      try {
+        await state.replyStream.showPanel(panel);
+        this.logger.event?.('remote.native_slash.panel.replaced', {
+          pluginId: state.pluginId,
+          conversationId: state.conversationId,
+          sessionId: state.session?.id || '',
+          command: panel?.command || '',
+          kind: panel?.kind || ''
+        });
+        return true;
+      } catch (error) {
+        this.logger.warn?.('Remote native page stream panel failed:', error.message);
+      }
+    }
+    return this.safeReplyPanel(state, panel, fallbackText);
+  }
+
   formatStateOutput(state, data) {
     if (!state.nativeCommand) return '';
     return formatNativeSlashOutput({
@@ -2645,11 +2676,21 @@ class RemoteSessionController {
 
   buildNativeChoicePanelPayload(state, pending, choice) {
     const command = normalizeNativeCodexCommand(pending?.command);
-    const content = formatNativeChoicePrompt(choice);
+    const fullAccessConfirmation =
+      command === '/permissions' &&
+      String(pending?.completionAction || pending?.action || '').toLowerCase() ===
+        'permission_full_access';
+    const content = fullAccessConfirmation
+      ? formatFullAccessConfirmationPrompt(choice)
+      : formatNativeChoicePrompt(choice);
     return {
       ...this.buildNativeSlashPanelPayload(state, content),
-      title: `Remote Codex ${command} 确认`,
-      notice: 'Codex 还需要完成下一步选择，当前操作尚未结束。',
+      title: fullAccessConfirmation
+        ? 'Remote Codex · 确认 Full Access'
+        : `Remote Codex ${command} 确认`,
+      notice: fullAccessConfirmation
+        ? ''
+        : 'Codex 还需要完成下一步选择，当前操作尚未结束。',
       content,
       message: content,
       actions: ['up', 'down', 'enter', 'escape'],
@@ -2857,7 +2898,7 @@ class RemoteSessionController {
         if (signature && signature !== pending.followupSignature) {
           pending.followupSignature = signature;
           const panel = this.buildNativeChoicePanelPayload(state, pending, choice);
-          this.safeReplyPanel(state, panel, panel.fallbackText);
+          this.presentNativePagePanel(state, panel, panel.fallbackText);
           this.logger.event?.('remote.native_slash.action.followup', {
             pluginId: state.pluginId,
             conversationId: state.conversationId,
@@ -2877,7 +2918,7 @@ class RemoteSessionController {
           if (formatted) {
             const panel = this.buildNativeSlashPanelPayload(state, formatted);
             panel.notice = 'Codex 已进入下一步选择，当前操作尚未结束。';
-            this.safeReplyPanel(state, panel, formatted);
+            this.presentNativePagePanel(state, panel, formatted);
             this.logger.event?.('remote.native_slash.action.followup', {
               pluginId: state.pluginId,
               conversationId: state.conversationId,
@@ -2913,7 +2954,7 @@ class RemoteSessionController {
     const text = formatNativePageActionResult(pending, state);
     const hadStream = Boolean(state.replyStream);
     this.finishNativePageStream(state, text);
-    if (typeof state.replyPanel === 'function') {
+    if (!hadStream && typeof state.replyPanel === 'function') {
       const panel = {
         kind: 'native_slash',
         title: `Remote Codex ${normalizeNativeCodexCommand(pending.command)}`,
@@ -4338,6 +4379,24 @@ function formatNativeChoicePrompt(prompt) {
   }
   lines.push('', '使用上移/下移切换选择，再点击确认；点击退出会取消当前操作。');
   return lines.join('\n');
+}
+
+function formatFullAccessConfirmationPrompt(prompt) {
+  if (!prompt) return '';
+  const selected = prompt.options
+    ?.map(normalizeApprovalOption)
+    .find((option) => option.selected);
+  const cancelling = isCancelNativeChoice(selected?.text || '');
+  return [
+    '**确认启用 Full Access**',
+    '- Codex 将可以读写工作区之外的文件。',
+    '- Codex 将可以执行联网命令，不再逐次请求批准。',
+    '',
+    '> 此模式会显著增加数据丢失、信息泄露或意外操作的风险，只应在可信任务中启用。',
+    '',
+    `**当前选择：${cancelling ? '取消' : '继续启用'}**`,
+    '- 使用上移/下移切换，再点击确认。'
+  ].join('\n');
 }
 
 function nativeChoicePromptSignature(prompt) {

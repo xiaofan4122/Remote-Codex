@@ -39,6 +39,7 @@ async function main() {
   await testClosedNativeStreamDoesNotSendTrailingPanel();
   await testNativeNavigationAllowsOriginalPanelRefresh();
   await testPermissionModeButtonSelectsAndConfirms();
+  await testPermissionFollowupReusesStreamingCard();
   await testGenericModelPickerNavigationAndCompletion();
   await testReviewPickerTransitionsToNextRolloutTask();
   await testNativeReportCompletesAndReleasesNextInput();
@@ -478,15 +479,6 @@ async function testActiveVisualStateQueuesNewInput() {
   assert.equal(writes.length, 1);
   assert.match(writes[0], /new task/);
   assert.deepEqual(replies, []);
-  assert.equal(state.lastInputText, 'old task that is still running');
-  assert.equal(state.queuedMessages.length, 1);
-
-  state.turnStartedAt = 0;
-  state.rolloutFinished = true;
-  state.turnFinishedNotified = false;
-  controller.notifyTurnFinished(state);
-  await wait(0);
-
   assert.equal(state.queuedMessages.length, 0);
   assert.equal(state.lastInputText, 'new task');
   assert.ok(state.rolloutTurn);
@@ -552,12 +544,6 @@ async function testQueuedInputClosesReplacedTurnWithoutFailure() {
     createReplyStream: state.createReplyStream
   });
 
-  const replacement = new Error('A new rollout task started before the bound task completed.');
-  replacement.code = 'CODEX_ROLLOUT_TURN_REPLACED';
-  replacement.turnId = 'turn-first';
-  replacement.nextTurnId = 'turn-follow-up';
-  controller.enqueueRolloutFailure(state, 0, replacement);
-  await state.rolloutEventChain;
   await wait(10);
 
   assert.equal(writes.length, 1);
@@ -591,6 +577,7 @@ async function testClosingCardQueuesNewInput() {
   });
   state.replyStream = { unregister() {} };
   state.streamFinishedForTurn = false;
+  state.rolloutFinished = true;
   controller.sessions.set('feishu:chat', state);
 
   await controller.handleMessage({
@@ -1413,8 +1400,9 @@ async function testPermissionModeButtonSelectsAndConfirms() {
   assert.equal(panels.length, 1);
   assert.equal(panels[0].active, true);
   assert.equal(panels[0].completed, undefined);
-  assert.match(panels[0].content, /Enable full access\?/);
-  assert.match(panels[0].content, /> 1\. Yes, continue anyway/);
+  assert.match(panels[0].content, /确认启用 Full Access/);
+  assert.match(panels[0].content, /当前选择：继续启用/);
+  assert.doesNotMatch(panels[0].content, /Enable full access|Yes, continue anyway/);
   assert.deepEqual(panels[0].actions, ['up', 'down', 'enter', 'escape']);
 
   await controller.sendControlInput(
@@ -1564,6 +1552,87 @@ async function testPermissionModeButtonSelectsAndConfirms() {
 
   assert.deepEqual(writes, ['\x1b[B', '\x1b[B', '\r']);
   assert.equal(loadingState.nativePageAction.action, 'permission_full_access');
+}
+
+async function testPermissionFollowupReusesStreamingCard() {
+  const controller = createController();
+  const writes = [];
+  const staticPanels = [];
+  const shownPanels = [];
+  const replacements = [];
+  const finishes = [];
+  const state = createState({
+    nativeCommand: { command: '/permissions' },
+    snapshot: permissionsSnapshot('Default'),
+    write(input) {
+      writes.push(input);
+    }
+  });
+  state.replyPanel = async (panel) => staticPanels.push(panel);
+  state.replyStream = {
+    async showPanel(panel) {
+      shownPanels.push(panel);
+    },
+    async replace(text) {
+      replacements.push(text);
+    },
+    async update(text) {
+      replacements.push(text);
+    },
+    async finish(text) {
+      finishes.push(text);
+    },
+    setCompletionState() {},
+    unregister() {}
+  };
+  controller.sessions.set('feishu:chat', state);
+
+  await controller.sendControlInput(
+    'feishu:chat',
+    {
+      pluginId: 'feishu',
+      conversationId: 'chat',
+      userId: 'user',
+      pageContext: '/permissions',
+      reply: async () => {},
+      replyPanel: state.replyPanel
+    },
+    'permission_full_access'
+  );
+
+  state.session.visualSnapshot = fullAccessConfirmationSnapshot('continue');
+  state.session.visualViewportSnapshot = state.session.visualSnapshot;
+  controller.queueOutput(state, 'full access confirmation opened');
+  await wait(10);
+
+  assert.equal(shownPanels.length, 1);
+  assert.equal(staticPanels.length, 0);
+  assert.equal(shownPanels[0].title, 'Remote Codex · 确认 Full Access');
+  assert.match(shownPanels[0].content, /确认启用 Full Access/);
+  assert.match(shownPanels[0].content, /当前选择：继续启用/);
+  assert.doesNotMatch(shownPanels[0].content, /Enable full access|Yes, continue anyway/);
+
+  await controller.sendControlInput(
+    'feishu:chat',
+    {
+      pluginId: 'feishu',
+      conversationId: 'chat',
+      userId: 'user',
+      pageContext: '/permissions',
+      reply: async () => {},
+      replyPanel: state.replyPanel
+    },
+    'enter'
+  );
+  state.session.visualSnapshot = `${fullAccessConfirmationSnapshot('continue')}\n› `;
+  state.session.visualViewportSnapshot = state.session.visualSnapshot;
+  controller.queueOutput(state, 'permissions closed');
+  await wait(20);
+
+  assert.equal(state.nativeCommand, null);
+  assert.equal(staticPanels.length, 0, 'streaming flow must not send a second card');
+  assert.match(replacements.at(-1), /权限模式已更新/);
+  assert.deepEqual(finishes, [replacements.at(-1)]);
 }
 
 async function testGenericModelPickerNavigationAndCompletion() {
