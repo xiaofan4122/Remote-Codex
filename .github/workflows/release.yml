@@ -53,7 +53,7 @@ jobs:
         run: npm run smoke:linux-artifact -- "${{ matrix.arch }}"
 
       - name: Upload architecture assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
           path: |

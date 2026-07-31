@@ -45,7 +45,7 @@ jobs:
         run: npm run smoke:linux-artifact -- x64
 
       - name: Upload package smoke-test artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: remote-codex-linux-x64-ci
           path: |
