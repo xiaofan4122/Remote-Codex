@@ -68,25 +68,26 @@ if [ -n "${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}" ]; then
   done
 fi
 
-docker run --rm \
-  --user "${REMOTE_CODEX_BUILD_UID}:${REMOTE_CODEX_BUILD_GID}" \
-  "${REMOTE_CODEX_DOCKER_NETWORK_ARGS[@]}" \
-  --env "REMOTE_CODEX_BUILD_ARCH=${REMOTE_CODEX_BUILD_ARCH}" \
-  --env "REMOTE_CODEX_DEB_ARCH=${REMOTE_CODEX_DEB_ARCH}" \
-  --env npm_config_cache=/tmp/remote-codex-npm-cache \
-  --env ELECTRON_CACHE=/tmp/remote-codex-electron-cache \
-  --env npm_config_devdir=/tmp/remote-codex-electron-gyp \
-  --env XDG_CACHE_HOME=/tmp/remote-codex-cache \
-  --volume "${REMOTE_CODEX_PROJECT_ROOT}:/source:ro" \
-  --volume "${REMOTE_CODEX_BUILD_WORK_DIR}:/workspace" \
-  --volume "${REMOTE_CODEX_PROJECT_ROOT}/dist:/output" \
-  --volume "${REMOTE_CODEX_NPM_CACHE}:/tmp/remote-codex-npm-cache" \
-  --volume "${REMOTE_CODEX_ELECTRON_CACHE}:/tmp/remote-codex-electron-cache" \
-  --volume "${REMOTE_CODEX_ELECTRON_GYP_CACHE}:/tmp/remote-codex-electron-gyp" \
-  --volume "${REMOTE_CODEX_XDG_CACHE}:/tmp/remote-codex-cache" \
-  --workdir /workspace \
-  "${REMOTE_CODEX_CONTAINER_IMAGE}" \
-  bash -lc '
+run_release_build_container() {
+  docker run --rm \
+    --user "${REMOTE_CODEX_BUILD_UID}:${REMOTE_CODEX_BUILD_GID}" \
+    "${REMOTE_CODEX_DOCKER_NETWORK_ARGS[@]}" \
+    --env "REMOTE_CODEX_BUILD_ARCH=${REMOTE_CODEX_BUILD_ARCH}" \
+    --env "REMOTE_CODEX_DEB_ARCH=${REMOTE_CODEX_DEB_ARCH}" \
+    --env npm_config_cache=/tmp/remote-codex-npm-cache \
+    --env ELECTRON_CACHE=/tmp/remote-codex-electron-cache \
+    --env npm_config_devdir=/tmp/remote-codex-electron-gyp \
+    --env XDG_CACHE_HOME=/tmp/remote-codex-cache \
+    --volume "${REMOTE_CODEX_PROJECT_ROOT}:/source:ro" \
+    --volume "${REMOTE_CODEX_BUILD_WORK_DIR}:/workspace" \
+    --volume "${REMOTE_CODEX_PROJECT_ROOT}/dist:/output" \
+    --volume "${REMOTE_CODEX_NPM_CACHE}:/tmp/remote-codex-npm-cache" \
+    --volume "${REMOTE_CODEX_ELECTRON_CACHE}:/tmp/remote-codex-electron-cache" \
+    --volume "${REMOTE_CODEX_ELECTRON_GYP_CACHE}:/tmp/remote-codex-electron-gyp" \
+    --volume "${REMOTE_CODEX_XDG_CACHE}:/tmp/remote-codex-cache" \
+    --workdir /workspace \
+    "${REMOTE_CODEX_CONTAINER_IMAGE}" \
+    bash -lc '
     set -Eeuo pipefail
     tar -C /source \
       --exclude=./.git \
@@ -105,3 +106,20 @@ docker run --rm \
       "dist/remote-codex-linux-${REMOTE_CODEX_DEB_ARCH}.deb.sha256" \
       /output/
   '
+}
+
+REMOTE_CODEX_DOCKER_STATUS=0
+run_release_build_container || REMOTE_CODEX_DOCKER_STATUS=$?
+if [ "${REMOTE_CODEX_DOCKER_STATUS}" -eq 0 ]; then
+  exit 0
+fi
+if [ "${REMOTE_CODEX_DOCKER_STATUS}" -ne 125 ]; then
+  exit "${REMOTE_CODEX_DOCKER_STATUS}"
+fi
+
+# Exit 125 means Docker failed before the container command started. GitHub
+# hosted runners can hit transient daemon or image-start failures, so retry
+# that infrastructure-only case once without masking real build failures.
+printf 'Docker could not start the release container; retrying once in 5 seconds.\n' >&2
+sleep 5
+run_release_build_container
