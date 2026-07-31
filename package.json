@@ -1,6 +1,6 @@
 {
   "name": "remote-codex",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "Linux desktop and Feishu remote-control shell for the native Codex CLI.",
   "desktopName": "Remote Codex",

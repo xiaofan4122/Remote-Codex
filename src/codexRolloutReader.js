@@ -7,6 +7,7 @@ const DEFAULT_BIND_TIMEOUT_MS = 60000;
 const DEFAULT_TURN_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_INITIAL_TAIL_BYTES = 64 * 1024 * 1024;
 const TURN_START_TOLERANCE_MS = 0;
+const ROLLOUT_TURN_REPLACED_ERROR_CODE = 'CODEX_ROLLOUT_TURN_REPLACED';
 
 class CodexRolloutReader {
   constructor(options = {}) {
@@ -249,7 +250,13 @@ class CodexRolloutTurn {
     if (payload.type === 'task_started') {
       const nextTurnId = String(payload.turn_id || '');
       if (this.turnId && nextTurnId && nextTurnId !== this.turnId) {
-        this.fail('A new rollout task started before the bound task completed.');
+        const error = new Error(
+          'A new rollout task started before the bound task completed.'
+        );
+        error.code = ROLLOUT_TURN_REPLACED_ERROR_CODE;
+        error.turnId = this.turnId;
+        error.nextTurnId = nextTurnId;
+        this.fail(error);
         return;
       }
       if (!this.turnId) this.turnId = nextTurnId;
@@ -308,7 +315,9 @@ class CodexRolloutTurn {
 
   fail(message) {
     if (this.stopped) return;
-    const error = new Error(String(message || 'Codex rollout reader failed.'));
+    const error = message instanceof Error
+      ? message
+      : new Error(String(message || 'Codex rollout reader failed.'));
     this.logger.warn?.('Codex rollout reader:', error.message);
     try {
       this.onError?.(error);
@@ -546,6 +555,7 @@ function fileExists(fsImpl, target) {
 
 module.exports = {
   CodexRolloutReader,
+  ROLLOUT_TURN_REPLACED_ERROR_CODE,
   locateSubmittedTurn,
   normalizeRolloutMessage,
   readIncrementalJsonl,

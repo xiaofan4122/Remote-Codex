@@ -429,6 +429,14 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
     feishuMessage(prompt, 'om_approval_prompt')
   );
   await waitUntil(() => harness.cardCreates.length === 1);
+  const firstTurn = harness.rolloutReader.latest();
+  firstTurn.emit(boundEvent('session-approval', 'turn-approval'));
+  firstTurn.emit({ type: 'turn_started', turnId: 'turn-approval' });
+  firstTurn.emit({
+    type: 'progress',
+    text: '我正在验证发布流程，当前进展需要在授权后继续保留。'
+  });
+  await waitUntil(() => harness.updates.length >= 1);
 
   const approvalSnapshot = [
     `› ${prompt}`,
@@ -488,8 +496,8 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
     JSON.parse(harness.streamingModeUpdates[0].body.settings),
     { config: { streaming_mode: false } }
   );
-  assert.equal(harness.streamingModeUpdates[0].body.sequence, 2);
-  assert.equal(harness.cardReplacements[0].body.sequence, 3);
+  assert.equal(harness.streamingModeUpdates[0].body.sequence, 3);
+  assert.equal(harness.cardReplacements[0].body.sequence, 4);
   assert.equal(harness.cardCreates.length, 1);
   assert.equal(harness.cardMessages.length, 1);
   assert.equal(harness.textFallbacks.length, 0);
@@ -525,10 +533,53 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
     submittedCard.body.elements.some((element) => element.tag === 'action'),
     false
   );
-  assert.match(streamingCardMarkdown(submittedCard), /操作已提交/);
+  const submittedMarkdown = streamingCardMarkdown(submittedCard);
+  assert.match(submittedMarkdown, /verify the release/);
+  assert.match(submittedMarkdown, /npm test/);
+  assert.match(submittedMarkdown, /授权状态/);
+  assert.match(submittedMarkdown, /Codex 正在继续执行/);
+  assert.doesNotMatch(submittedMarkdown, /这张卡片已锁定|Options:|Yes|No/);
   assert.equal(harness.session.writes.at(-1), 'y');
   assert.equal(harness.cardCreates.length, 1);
   assert.equal(harness.cardMessages.length, 1);
+
+  await harness.plugin.handleReceiveMessage(
+    feishuMessage('授权后立即追加的任务', 'om_after_approval')
+  );
+  await waitUntil(() => harness.rolloutReader.turns.length === 2);
+  assert.match(harness.session.writes.at(-1), /授权后立即追加的任务/);
+
+  const replacement = new Error(
+    'A new rollout task started before the bound task completed.'
+  );
+  replacement.code = 'CODEX_ROLLOUT_TURN_REPLACED';
+  replacement.turnId = 'turn-approval';
+  replacement.nextTurnId = 'turn-after-approval';
+  firstTurn.fail(replacement);
+
+  await waitUntil(() => harness.closes.length === 1);
+  await waitUntil(() => harness.cardCreates.length === 2);
+  const handoffCard = parseClosedStreamingCard(harness.closes[0]);
+  const handoffMarkdown = streamingCardMarkdown(handoffCard);
+  assert.equal(handoffCard.header.template, 'blue');
+  assert.match(handoffMarkdown, /当前进展需要在授权后继续保留/);
+  assert.match(handoffMarkdown, /已收到后续消息/);
+  assert.doesNotMatch(handoffMarkdown, /Remote Codex 输出失败|无法绑定/);
+
+  const secondTurn = harness.rolloutReader.latest();
+  secondTurn.emit(boundEvent('session-approval', 'turn-after-approval'));
+  secondTurn.emit({ type: 'turn_started', turnId: 'turn-after-approval' });
+  secondTurn.emit({ type: 'final', text: '追加任务已正常完成。' });
+  secondTurn.emit({
+    type: 'turn_complete',
+    turnId: 'turn-after-approval',
+    finalText: '追加任务已正常完成。'
+  });
+  await waitUntil(() => harness.closes.length === 2);
+  assert.equal(
+    streamingCardMarkdown(parseClosedStreamingCard(harness.closes[1])),
+    '追加任务已正常完成。'
+  );
   cleanupHarness(harness);
 }
 

@@ -11,6 +11,7 @@ async function main() {
   await testProactiveLeaseRenewal();
   await testTimeoutRecovery();
   await testPanelInteractionRetryReusesSequence();
+  await testApprovalFeedbackPreservesProgressAndResumesStreaming();
   await testRenewalFailureLogging();
   await testLongRunningFinalization();
   process.stdout.write('Feishu reply stream lease tests passed.\n');
@@ -199,6 +200,51 @@ async function testPanelInteractionRetryReusesSequence() {
   assert.ok(
     plugin.events.some(({ name }) => name === 'feishu.stream.interaction.retry')
   );
+}
+
+async function testApprovalFeedbackPreservesProgressAndResumesStreaming() {
+  const calls = [];
+  const plugin = createStreamPlugin({
+    async updateStreamingContent(payload) {
+      calls.push({ type: 'update', ...payload });
+    },
+    async replaceStreamingPanel(payload) {
+      calls.push({ type: 'panel', ...payload });
+      return { sequence: payload.sequence };
+    },
+    async replaceStreamingText(payload) {
+      calls.push({ type: 'replace', ...payload });
+    }
+  });
+  const stream = createStream(plugin);
+
+  await stream.update('我正在检查安装脚本和发布配置。');
+  await stream.showPanel({
+    kind: 'permission',
+    attached: true,
+    active: true,
+    fallbackText: '带有选项的内部回退文本不应覆盖用户看到的审批内容。',
+    approval: {
+      reason: '安装系统依赖以完成发布检查。',
+      command: 'sudo apt-get install libsecret-1-0',
+      question: '是否允许执行命令？',
+      options: ['允许一次', '总是允许', '拒绝']
+    }
+  });
+  await stream.showActionFeedback('approve_persistent');
+
+  const feedback = calls.find(({ type }) => type === 'replace')?.text || '';
+  assert.match(feedback, /安装系统依赖以完成发布检查/);
+  assert.match(feedback, /sudo apt-get install libsecret-1-0/);
+  assert.match(feedback, /授权状态/);
+  assert.match(feedback, /已提交「总是允许」/);
+  assert.match(feedback, /Codex 正在继续执行/);
+  assert.doesNotMatch(feedback, /这张卡片已锁定|是否允许执行|允许一次|拒绝|内部回退文本/);
+
+  await stream.update('我正在检查安装脚本和发布配置。\n\n修复已完成，正在运行测试。');
+  assert.equal(stream.currentText, '我正在检查安装脚本和发布配置。\n\n修复已完成，正在运行测试。');
+  assert.equal(stream.actionFeedbackText, '');
+  assert.equal(stream.panelActive, false);
 }
 
 async function testLongRunningFinalization() {

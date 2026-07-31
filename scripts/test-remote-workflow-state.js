@@ -18,6 +18,7 @@ async function main() {
   await testRemoteInputWritesBeforeReplyStreamReady();
   await testOutputWaitsForPendingReplyStream();
   await testActiveVisualStateQueuesNewInput();
+  await testQueuedInputClosesReplacedTurnWithoutFailure();
   await testClosingCardQueuesNewInput();
   await testDoneReactionWaitsForSettledVisualTurn();
   await testPromptSuggestionSettlesVisualTurn();
@@ -497,6 +498,86 @@ async function testActiveVisualStateQueuesNewInput() {
   });
   await state.rolloutEventChain;
   assert.deepEqual(replies, ['queued reply']);
+}
+
+async function testQueuedInputClosesReplacedTurnWithoutFailure() {
+  const controller = createController();
+  const writes = [];
+  const firstUpdates = [];
+  const firstFinishes = [];
+  const secondUpdates = [];
+  const secondFinishes = [];
+  let streamCount = 0;
+  const state = createState({
+    turnStartedAt: Date.now(),
+    snapshot: 'Thinking\n› ',
+    write(input) {
+      writes.push(input);
+    }
+  });
+  state.lastInputText = 'first task';
+  state.rolloutTurn = controller.testRolloutReader.beginTurn({
+    onEvent: (event) => controller.enqueueRolloutEvent(state, 0, event),
+    onError: (error) => controller.enqueueRolloutFailure(state, 0, error)
+  });
+  state.createReplyStream = async () => {
+    streamCount += 1;
+    const updates = streamCount === 1 ? firstUpdates : secondUpdates;
+    const finishes = streamCount === 1 ? firstFinishes : secondFinishes;
+    return {
+      setCompletionState() {},
+      async update(text) {
+        updates.push(text);
+      },
+      async replace(text) {
+        updates.push(text);
+      },
+      async finish(text) {
+        finishes.push(text);
+      },
+      unregister() {}
+    };
+  };
+  state.replyStream = await state.createReplyStream();
+  state.rolloutProgressText = '第一轮已有的进展不能丢失。';
+  state.lastStreamText = state.rolloutProgressText;
+  controller.sessions.set('feishu:chat', state);
+
+  await controller.handleMessage({
+    pluginId: 'feishu',
+    conversationId: 'chat',
+    userId: 'user',
+    text: 'follow-up task',
+    reply: async () => {},
+    createReplyStream: state.createReplyStream
+  });
+
+  const replacement = new Error('A new rollout task started before the bound task completed.');
+  replacement.code = 'CODEX_ROLLOUT_TURN_REPLACED';
+  replacement.turnId = 'turn-first';
+  replacement.nextTurnId = 'turn-follow-up';
+  controller.enqueueRolloutFailure(state, 0, replacement);
+  await state.rolloutEventChain;
+  await wait(10);
+
+  assert.equal(writes.length, 1);
+  assert.equal(state.rolloutFailed, false);
+  assert.equal(firstFinishes.length, 1);
+  assert.match(firstFinishes[0], /第一轮已有的进展不能丢失/);
+  assert.match(firstFinishes[0], /已收到后续消息/);
+  assert.doesNotMatch(firstFinishes[0], /Remote Codex 输出失败|无法绑定/);
+  assert.equal(state.queuedMessages.length, 0);
+  assert.equal(state.lastInputText, 'follow-up task');
+  assert.equal(streamCount, 2);
+
+  controller.testRolloutReader.latest().emit({ type: 'final', text: '后续任务正常完成。' });
+  controller.testRolloutReader.latest().emit({
+    type: 'turn_complete',
+    finalText: '后续任务正常完成。'
+  });
+  await state.rolloutEventChain;
+  await wait(10);
+  assert.deepEqual(secondFinishes, ['后续任务正常完成。']);
 }
 
 async function testClosingCardQueuesNewInput() {
@@ -1934,6 +2015,8 @@ function createState(options = {}) {
     nativePanelUpdateRequested: false,
     controlActionLocks: new Map(),
     lastApprovalSignature: '',
+    submittedApprovalSignature: '',
+    submittedApprovalAt: 0,
     lastInputText: '',
     nativeCommand: options.nativeCommand || null,
     nativePageAction: null,

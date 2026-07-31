@@ -33,6 +33,9 @@ const {
   shouldBindNextRollout,
   shouldRouteAsNativePage
 } = require('./nativeSlashCommands');
+const {
+  ROLLOUT_TURN_REPLACED_ERROR_CODE
+} = require('./codexRolloutReader');
 
 const ANSI_PATTERN =
   /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
@@ -44,6 +47,7 @@ const STREAM_FINAL_SETTLE_MS = 1500;
 const STREAM_FINAL_DEBOUNCE_MS = 15000;
 const STREAM_WORKING_HEARTBEAT_MS = 5000;
 const VISUAL_BUSY_STALE_MS = 30 * 60 * 1000;
+const APPROVAL_SUBMISSION_GRACE_MS = 15 * 1000;
 const REMOTE_CODEX_COLOR_MARKER_PREFIX = '<!--remote-codex-color:';
 const REMOTE_CODEX_COLOR_MARKER_SUFFIX = '-->';
 const TERMINAL_ROLE_COLORS = {
@@ -256,6 +260,21 @@ class RemoteSessionController {
       const approval = this.getApprovalPrompt(state);
       if (approval) {
         const signature = approvalPromptSignature(approval);
+        const recentlySubmitted =
+          signature &&
+          signature === state.submittedApprovalSignature &&
+          Date.now() - Number(state.submittedApprovalAt || 0) <=
+            APPROVAL_SUBMISSION_GRACE_MS;
+        if (recentlySubmitted) {
+          this.logger.event?.('remote.message.queued_after_approval', {
+            pluginId: message.pluginId,
+            conversationId: message.conversationId,
+            sessionId: state.session?.id || '',
+            promptChars: text.length
+          });
+          this.queueRemoteMessage(state, message, text);
+          return;
+        }
         if (
           signature &&
           signature !== state.lastApprovalSignature &&
@@ -527,6 +546,14 @@ class RemoteSessionController {
         ) {
           return;
         }
+        if (
+          error?.code === ROLLOUT_TURN_REPLACED_ERROR_CODE &&
+          Array.isArray(state.queuedMessages) &&
+          state.queuedMessages.length > 0
+        ) {
+          await this.completeReplacedRolloutForQueuedMessage(state, error);
+          return;
+        }
         state.rolloutFailed = true;
         state.rolloutTurn?.stop?.('controller_error');
         state.rolloutTurn = null;
@@ -553,6 +580,48 @@ class RemoteSessionController {
         this.finishRolloutTurn(state);
       });
     return state.rolloutEventChain;
+  }
+
+  async completeReplacedRolloutForQueuedMessage(state, error) {
+    const previousText = String(
+      state.rolloutProgressText || state.lastStreamText || ''
+    ).trim();
+    const handoffText = [
+      previousText,
+      '',
+      '> 已收到后续消息，本轮已转入下一条任务。'
+    ].filter(Boolean).join('\n');
+
+    this.logger.event?.('remote.rollout.turn.handed_off', {
+      pluginId: state.pluginId,
+      conversationId: state.conversationId,
+      sessionId: state.session?.id || '',
+      rolloutSessionId: state.rolloutSessionId || '',
+      rolloutTurnId: error?.turnId || state.rolloutTurnId || '',
+      nextRolloutTurnId: error?.nextTurnId || '',
+      queueLength: state.queuedMessages.length
+    });
+    this.recordParserTrace(state, {
+      source: 'rollout_jsonl',
+      reason: 'queued_rollout_handoff',
+      decision: 'close_current_card_and_activate_queued_turn',
+      formatted: handoffText
+    });
+
+    if (state.replyStreamStarting && state.replyStreamReadyPromise) {
+      await state.replyStreamReadyPromise.catch(() => {});
+    }
+    if (state.replyStream) {
+      state.lastStreamText = handoffText;
+      this.updateReplyStream(state, handoffText, {
+        final: true,
+        immediate: true,
+        finishDelayMs: 0,
+        completionTemplate: 'blue',
+        completionSubtitle: '已转入下一条消息'
+      });
+    }
+    this.finishRolloutTurn(state);
   }
 
   async handleRolloutEvent(state, event = {}) {
@@ -1230,6 +1299,8 @@ class RemoteSessionController {
       controlActionLocks: new Map(),
       lastApprovalSignature: '',
       lastApprovalAttemptSignature: '',
+      submittedApprovalSignature: '',
+      submittedApprovalAt: 0,
       approvalPanelInFlight: false,
       approvalPanelRetryAt: 0,
       lastInputText: '',
@@ -1612,6 +1683,8 @@ class RemoteSessionController {
     }
     this.refreshSessionPhase(state, 'control_sent');
     if (approvalAction) {
+      state.submittedApprovalSignature = approvalPromptSignature(approval);
+      state.submittedApprovalAt = Date.now();
       state.outputBuffer = '';
       this.scheduleStreamHeartbeat(state);
     }
@@ -3025,6 +3098,8 @@ class RemoteSessionController {
     state.nativePanelUpdateRequested = false;
     state.lastApprovalSignature = '';
     state.lastApprovalAttemptSignature = '';
+    state.submittedApprovalSignature = '';
+    state.submittedApprovalAt = 0;
     state.approvalPanelInFlight = false;
     state.approvalPanelRetryAt = 0;
     state.nativeCommand = null;

@@ -136,13 +136,14 @@ function formatPermissionModeActionLabel(action) {
 
 function buildStreamingActionFeedback({ action, page = '', currentText = '' } = {}) {
   const feedback = formatActionFeedback(action, page);
-  if (isNavigationCardAction(action)) {
+  const value = String(action || '').toLowerCase();
+  if (isNavigationCardAction(value) || ['approve', 'approve_persistent', 'deny'].includes(value)) {
     const content = String(currentText || '').trim();
     return [
       content,
       '',
-      '**操作状态**',
-      `- ${feedback.status}`
+      `**${isNavigationCardAction(value) ? '操作状态' : '授权状态'}**`,
+      `- ${feedback.status}${isNavigationCardAction(value) ? '' : ' Codex 正在继续执行。'}`
     ].filter(Boolean).join('\n');
   }
   return [

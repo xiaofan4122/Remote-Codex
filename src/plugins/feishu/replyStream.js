@@ -1,4 +1,5 @@
 const { buildStreamingActionFeedback } = require('./cardActions');
+const { buildPanelMarkdown } = require('./cardBuilders');
 const { summarizeForCard } = require('./cardMarkdown');
 
 const FEISHU_STREAM_MIN_UPDATE_INTERVAL_MS = 110;
@@ -50,6 +51,7 @@ class FeishuReplyStream {
     this.closed = false;
     this.actionFeedbackText = '';
     this.panelActive = false;
+    this.panelRestoreText = '';
   }
 
   async update(text) {
@@ -73,6 +75,7 @@ class FeishuReplyStream {
     if (this.flushPromise) {
       await this.flushPromise;
     }
+    this.panelRestoreText = String(buildPanelMarkdown(panel) || '').trim();
     const nextSequence = this.sequence + 1;
     let result;
     try {
@@ -100,7 +103,9 @@ class FeishuReplyStream {
     const text = buildStreamingActionFeedback({
       action,
       page,
-      currentText: this.targetText || this.currentText
+      currentText: this.panelActive
+        ? this.panelRestoreText
+        : this.targetText || this.currentText
     });
     this.actionFeedbackText = text;
     if (this.panelActive) {
@@ -145,6 +150,7 @@ class FeishuReplyStream {
     this.targetText = nextText;
     this.lastUpdateAt = this.now();
     this.panelActive = false;
+    this.panelRestoreText = '';
   }
 
   setCompletionState({ title, template, subtitle } = {}) {
@@ -281,9 +287,13 @@ class FeishuReplyStream {
 
   async finish(text) {
     if (this.closed) return;
-    const sourceText = String(this.actionFeedbackText || text || this.currentText || '').trim();
+    const explicitText = String(text || '').trim();
+    const usingActionFeedback = !explicitText && Boolean(this.actionFeedbackText);
+    const sourceText = String(
+      explicitText || this.actionFeedbackText || this.currentText || ''
+    ).trim();
     let preparedContent = null;
-    if (this.renderLatex && !this.actionFeedbackText) {
+    if (this.renderLatex && !usingActionFeedback) {
       preparedContent = await this.plugin.prepareFinalCardContent(sourceText).catch((error) => {
         this.logger.warn?.('Feishu final LaTeX preparation failed', errorLogMeta(error, {
           cardId: this.cardId

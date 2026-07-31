@@ -189,6 +189,9 @@ async function testNextTaskBoundaryCannotLeakIntoBoundTurn() {
   ]);
   await waitUntil(() => errors.length === 1);
   assert.match(errors[0].message, /new rollout task started/i);
+  assert.equal(errors[0].code, 'CODEX_ROLLOUT_TURN_REPLACED');
+  assert.equal(errors[0].turnId, 'turn-incomplete');
+  assert.equal(errors[0].nextTurnId, 'turn-next');
   assert.doesNotMatch(JSON.stringify(events), /下一任务的内容绝不能泄漏/);
 }
 
