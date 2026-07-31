@@ -2403,19 +2403,31 @@ class RemoteSessionController {
     this.clearStreamHeartbeat(state);
     if (typeof state.replyStream?.showPanel === 'function') {
       Promise.resolve(state.replyStream.showPanel(panel)).catch((error) => {
-        if (state.lastApprovalSignature === signature) {
-          state.lastApprovalSignature = '';
-        }
-        this.logger.warn?.('Remote approval stream panel failed:', error.message);
+        this.logger.warn?.('Remote approval stream panel failed', {
+          error: String(error?.message || error || 'Unknown error'),
+          code: error?.code || null,
+          httpStatus: error?.httpStatus || null,
+          signature
+        });
+        Promise.resolve(state.replyStream?.replace?.(fallbackText)).catch((fallbackError) => {
+          this.logger.warn?.('Remote approval text fallback failed', {
+            error: String(fallbackError?.message || fallbackError || 'Unknown error'),
+            code: fallbackError?.code || null,
+            httpStatus: fallbackError?.httpStatus || null,
+            signature
+          });
+        });
       });
       return;
     }
     if (state.replyStream) {
       Promise.resolve(state.replyStream.replace(fallbackText)).catch((error) => {
-        if (state.lastApprovalSignature === signature) {
-          state.lastApprovalSignature = '';
-        }
-        this.logger.warn?.('Remote approval stream update failed:', error.message);
+        this.logger.warn?.('Remote approval stream update failed', {
+          error: String(error?.message || error || 'Unknown error'),
+          code: error?.code || null,
+          httpStatus: error?.httpStatus || null,
+          signature
+        });
       });
       return;
     }
@@ -2467,12 +2479,8 @@ class RemoteSessionController {
     };
   }
 
-  buildPermissionPanelActions(approval) {
-    const actions = ['approve', 'approve_persistent', 'deny'];
-    if (approval?.options?.length > 0) {
-      actions.push('up', 'down', 'enter');
-    }
-    return actions;
+  buildPermissionPanelActions() {
+    return ['approve', 'approve_persistent', 'deny'];
   }
 
   buildNativeSlashPanelPayload(state, content) {
@@ -4336,7 +4344,7 @@ function formatPermissionPanelText(payload) {
         lines.push(`${prefix} ${index}${parsed.text}`.trimEnd());
       }
     }
-    lines.push('', '发送 /approve、/always 或 /deny 处理；也可以用 /up、/down、/enter 精确选择。');
+    lines.push('', '发送 /approve、/always 或 /deny 处理。');
     return lines.join('\n').trim();
   }
 

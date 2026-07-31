@@ -454,8 +454,16 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
     approvalCard.body.elements
       .find((element) => element.tag === 'action')
       .actions.map((action) => action.value.remote_codex_action),
-    ['approve', 'approve_persistent', 'deny', 'up', 'down', 'enter']
+    ['approve', 'approve_persistent', 'deny']
   );
+  assert.equal(approvalCard.config.streaming_mode, false);
+  assert.equal(harness.streamingModeUpdates.length, 1);
+  assert.deepEqual(
+    JSON.parse(harness.streamingModeUpdates[0].body.settings),
+    { config: { streaming_mode: false } }
+  );
+  assert.equal(harness.streamingModeUpdates[0].body.sequence, 2);
+  assert.equal(harness.cardReplacements[0].body.sequence, 3);
   assert.equal(harness.cardCreates.length, 1);
   assert.equal(harness.cardMessages.length, 1);
   assert.equal(harness.textFallbacks.length, 0);
@@ -598,6 +606,7 @@ function createHarness(options = {}) {
   const updates = [];
   const closes = [];
   const cardReplacements = [];
+  const streamingModeUpdates = [];
   const closeRequests = [];
   const textFallbacks = [];
   let finished = 0;
@@ -652,6 +661,7 @@ function createHarness(options = {}) {
     updates,
     closes,
     cardReplacements,
+    streamingModeUpdates,
     closeRequests,
     textFallbacks,
     singleCardOutput,
@@ -679,6 +689,7 @@ function createHarness(options = {}) {
     updates,
     closes,
     cardReplacements,
+    streamingModeUpdates,
     closeRequests,
     textFallbacks,
     parserTraces,
@@ -699,6 +710,7 @@ function createFakeFeishuPlugin({
   updates,
   closes,
   cardReplacements,
+  streamingModeUpdates,
   closeRequests,
   textFallbacks,
   singleCardOutput,
@@ -741,7 +753,10 @@ function createFakeFeishuPlugin({
     }
     if (method === 'PUT' && /^\/cardkit\/v1\/cards\/[^/]+$/.test(requestPath)) {
       const card = JSON.parse(body.card?.data || '{}');
-      if (card.config?.streaming_mode === true) {
+      if (
+        card.config?.streaming_mode === true ||
+        String(body.uuid || '').startsWith('remote_codex_panel_')
+      ) {
         cardReplacements.push({ path: requestPath, method, body });
         return {};
       }
@@ -754,6 +769,11 @@ function createFakeFeishuPlugin({
       return {};
     }
     if (method === 'PATCH' && requestPath.endsWith('/settings')) {
+      const settings = JSON.parse(body.settings || '{}');
+      if (settings.config?.streaming_mode === false) {
+        streamingModeUpdates.push({ path: requestPath, method, body });
+        return {};
+      }
       closes.push({ path: requestPath, method, body });
       return {};
     }

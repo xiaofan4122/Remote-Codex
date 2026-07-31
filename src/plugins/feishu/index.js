@@ -36,6 +36,7 @@ const FEISHU_EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000;
 const FEISHU_EVENT_DEDUPE_MAX_ENTRIES = 1000;
 const FEISHU_ACTION_DEBOUNCE_MS = 700;
 const FEISHU_ACTION_SUBMIT_LOCK_MS = 10 * 60 * 1000;
+const FEISHU_INTERACTION_SETTLE_MS = 300;
 const FEISHU_API_BASE = 'https://open.feishu.cn/open-apis';
 const FEISHU_BOT_MENU_COMMANDS = [
   { label: '状态', command: '/status' },
@@ -713,9 +714,22 @@ class FeishuPlugin {
     }
     const stream = this.replyStreamsByMessageId.get(action.messageId);
     if (stream) {
-      await stream.showActionFeedback(action.remoteAction, action.page).catch((error) => {
-        this.logger.warn?.('Feishu stream action feedback failed:', error.message);
-      });
+      const showFeedback = () => {
+        return stream.showActionFeedback(action.remoteAction, action.page).catch((error) => {
+          this.logger.warn?.('Feishu stream action feedback failed', {
+            error: String(error?.message || error || 'Unknown error'),
+            code: error?.code || null,
+            httpStatus: error?.httpStatus || null,
+            action: action.remoteAction,
+            messageId: action.messageId
+          });
+        });
+      };
+      if (stream.panelActive) {
+        setTimeout(showFeedback, FEISHU_INTERACTION_SETTLE_MS).unref?.();
+      } else {
+        await showFeedback();
+      }
       return;
     }
     if (isBlockingNativePageSubmitAction(action.remoteAction)) {
@@ -1232,12 +1246,25 @@ class FeishuPlugin {
 
   async replaceStreamingPanel({ cardId, panel, sequence }) {
     const card = buildStreamingPanelCard(panel);
-    await this.replaceStreamingCardEntity({
-      cardId,
-      card,
-      sequence,
-      operation: 'panel'
-    });
+    let lastSuccessfulSequence = sequence - 1;
+    try {
+      await this.setStreamingMode({
+        cardId,
+        enabled: false,
+        sequence
+      });
+      lastSuccessfulSequence = sequence;
+      await this.replaceStreamingCardEntity({
+        cardId,
+        card,
+        sequence: sequence + 1,
+        operation: 'panel'
+      });
+      return { sequence: sequence + 1 };
+    } catch (error) {
+      error.cardSequence = lastSuccessfulSequence;
+      throw error;
+    }
   }
 
   async replaceStreamingText({ cardId, title, text, sequence }) {
@@ -1273,6 +1300,29 @@ class FeishuPlugin {
       cardId,
       sequence,
       operation
+    });
+  }
+
+  async setStreamingMode({ cardId, enabled, sequence }) {
+    await this.cardkitRequest(
+      `/cardkit/v1/cards/${encodeURIComponent(cardId)}/settings`,
+      {
+        method: 'PATCH',
+        body: {
+          settings: JSON.stringify({
+            config: {
+              streaming_mode: Boolean(enabled)
+            }
+          }),
+          sequence,
+          uuid: `remote_codex_stream_mode_${cardId}_${sequence}`
+        }
+      }
+    );
+    this.logger.event?.('feishu.stream.mode.updated', {
+      cardId,
+      enabled: Boolean(enabled),
+      sequence
     });
   }
 
@@ -1941,6 +1991,7 @@ module.exports.__private = {
   buildPanelMarkdown,
   buildStreamingActionFeedback,
   buildStreamingCard,
+  buildStreamingPanelCard,
   buildStreamingModeConfig,
   formatBotMenuCommandSummary,
   formatCardMarkdown,

@@ -22,6 +22,7 @@ async function main() {
   await testDoneReactionWaitsForSettledVisualTurn();
   await testPromptSuggestionSettlesVisualTurn();
   await testLocalMistypedStatusPageSendsSeparatePanel();
+  await testApprovalPanelFailureFallsBackOnlyOnce();
   testSessionPhases();
   await testResumeNavigationPatchesOriginalCard();
   await testResumeEnterShowsImmediateFeedback();
@@ -664,6 +665,40 @@ function testSessionPhases() {
   state.session.visualViewportSnapshot = 'Resume a previous session';
   state.nativeCommand = { command: '/resume' };
   assert.equal(controller.refreshSessionPhase(state), 'native_resume');
+}
+
+async function testApprovalPanelFailureFallsBackOnlyOnce() {
+  const controller = createController();
+  const panelAttempts = [];
+  const fallbacks = [];
+  const state = createState({
+    snapshot: approvalLines(),
+    turnStartedAt: Date.now()
+  });
+  state.replyStream = {
+    async showPanel(panel) {
+      panelAttempts.push(panel);
+      const error = new Error('invalid interactive card');
+      error.code = 200220;
+      error.httpStatus = 400;
+      throw error;
+    },
+    async replace(text) {
+      fallbacks.push(text);
+    }
+  };
+  controller.sessions.set('feishu:chat', state);
+
+  for (let index = 0; index < 8; index += 1) {
+    controller.queueOutput(state, 'approval repaint');
+    await wait(4);
+  }
+
+  assert.equal(panelAttempts.length, 1);
+  assert.equal(fallbacks.length, 1);
+  assert.match(fallbacks[0], /等待权限确认/);
+  assert.match(fallbacks[0], /npm test/);
+  assert.doesNotMatch(fallbacks[0], /\/up|\/down|\/enter/);
 }
 
 async function testResumeNavigationPatchesOriginalCard() {

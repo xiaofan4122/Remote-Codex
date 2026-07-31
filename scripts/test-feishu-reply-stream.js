@@ -10,6 +10,7 @@ async function main() {
   await testStructuredCardKitError();
   await testProactiveLeaseRenewal();
   await testTimeoutRecovery();
+  await testPanelInteractionRetryReusesSequence();
   await testRenewalFailureLogging();
   await testLongRunningFinalization();
   process.stdout.write('Feishu reply stream lease tests passed.\n');
@@ -169,6 +170,37 @@ async function testRenewalFailureLogging() {
   });
 }
 
+async function testPanelInteractionRetryReusesSequence() {
+  const calls = [];
+  let attempts = 0;
+  const plugin = createStreamPlugin({
+    async replaceStreamingText(payload) {
+      attempts += 1;
+      calls.push({ type: 'replace', ...payload });
+      if (attempts === 1) {
+        const error = new Error('Card is in an ongoing interaction 200810');
+        error.code = 200810;
+        error.httpStatus = 400;
+        throw error;
+      }
+    }
+  });
+  const stream = createStream(plugin);
+  stream.panelActive = true;
+
+  await stream.showActionFeedback('approve');
+
+  assert.deepEqual(
+    calls.map(({ type, sequence }) => [type, sequence]),
+    [['replace', 2], ['replace', 2]]
+  );
+  assert.equal(stream.sequence, 2);
+  assert.equal(stream.panelActive, false);
+  assert.ok(
+    plugin.events.some(({ name }) => name === 'feishu.stream.interaction.retry')
+  );
+}
+
 async function testLongRunningFinalization() {
   let now = 1_000;
   const calls = [];
@@ -228,6 +260,7 @@ function createStreamPlugin(overrides = {}) {
     },
     async updateStreamingContent() {},
     async renewStreamingMode() {},
+    async replaceStreamingText() {},
     async closeStreamingCard() {},
     ...overrides
   };

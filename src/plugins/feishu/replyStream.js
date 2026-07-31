@@ -6,6 +6,8 @@ const FEISHU_STREAM_CLOSE_RETRY_MS = 250;
 const FEISHU_STREAM_LEASE_MS = 10 * 60 * 1000;
 const FEISHU_STREAM_RENEW_AFTER_MS = 8 * 60 * 1000;
 const FEISHU_STREAM_RENEW_RETRY_MS = 5 * 1000;
+const FEISHU_INTERACTION_RETRY_MS = 300;
+const FEISHU_INTERACTION_RETRY_ATTEMPTS = 3;
 
 class FeishuReplyStream {
   constructor({
@@ -71,12 +73,21 @@ class FeishuReplyStream {
     if (this.flushPromise) {
       await this.flushPromise;
     }
-    this.sequence += 1;
-    await this.plugin.replaceStreamingPanel({
-      cardId: this.cardId,
-      panel,
-      sequence: this.sequence
-    });
+    const nextSequence = this.sequence + 1;
+    let result;
+    try {
+      result = await this.plugin.replaceStreamingPanel({
+        cardId: this.cardId,
+        panel,
+        sequence: nextSequence
+      });
+    } catch (error) {
+      if (Number(error?.cardSequence) >= nextSequence) {
+        this.sequence = Number(error.cardSequence);
+      }
+      throw error;
+    }
+    this.sequence = Number(result?.sequence) || nextSequence;
     const text = String(panel?.fallbackText || panel?.progressText || panel?.message || '').trim();
     this.currentText = text;
     this.targetText = text;
@@ -104,13 +115,32 @@ class FeishuReplyStream {
     if (this.flushPromise) {
       await this.flushPromise;
     }
-    this.sequence += 1;
-    await this.plugin.replaceStreamingText({
-      cardId: this.cardId,
-      title: this.title,
-      text: nextText,
-      sequence: this.sequence
-    });
+    for (let attempt = 1; attempt <= FEISHU_INTERACTION_RETRY_ATTEMPTS; attempt += 1) {
+      const sequence = this.sequence + 1;
+      try {
+        await this.plugin.replaceStreamingText({
+          cardId: this.cardId,
+          title: this.title,
+          text: nextText,
+          sequence
+        });
+        this.sequence = sequence;
+        break;
+      } catch (error) {
+        if (!isOngoingInteractionError(error) || attempt >= FEISHU_INTERACTION_RETRY_ATTEMPTS) {
+          throw error;
+        }
+        this.logger.event?.('feishu.stream.interaction.retry', {
+          cardId: this.cardId,
+          sequence,
+          attempt,
+          error: String(error?.message || error || 'Unknown error'),
+          code: error?.code || null,
+          httpStatus: error?.httpStatus || null
+        });
+        await this.wait(FEISHU_INTERACTION_RETRY_MS * attempt);
+      }
+    }
     this.currentText = nextText;
     this.targetText = nextText;
     this.lastUpdateAt = this.now();
@@ -355,6 +385,10 @@ function isStreamingTimeoutError(error) {
   return /(?:\b200510\b|card streaming timeout|streaming timeout)/i.test(
     String(error?.message || '')
   );
+}
+
+function isOngoingInteractionError(error) {
+  return Number(error?.code) === 200810 || /\b200810\b/.test(String(error?.message || ''));
 }
 
 function errorLogMeta(error, extra = {}) {

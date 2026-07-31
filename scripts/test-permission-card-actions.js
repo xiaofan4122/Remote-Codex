@@ -59,16 +59,16 @@ function testFeishuPermissionPanelShowsOptionsAndControls() {
     },
     message: 'Codex 正在等待权限确认。',
     progressText,
-    actions: ['approve', 'approve_persistent', 'deny', 'up', 'down', 'enter']
+    actions: ['approve', 'approve_persistent', 'deny']
   });
   const markdown = card.elements.find((element) => element.tag === 'markdown').content;
   const actions = card.elements.find((element) => element.tag === 'action').actions;
 
   assert.match(markdown, /> 2\. Yes, always approve/);
-  assert.match(markdown, /上移\/下移会切换 `>` 标记的选项/);
+  assert.doesNotMatch(markdown, /上移\/下移会切换/);
   assert.deepEqual(
     actions.map((action) => action.text.content),
-    ['允许一次', '总是允许', '拒绝', '上移', '下移', '确认']
+    ['允许一次', '总是允许', '拒绝']
   );
 
   const fallbackCard = feishuPlugin.__private.buildPanelCard({
@@ -84,7 +84,7 @@ function testFeishuPermissionPanelShowsOptionsAndControls() {
       ]
     },
     message: 'Codex 正在等待权限确认。',
-    actions: ['approve', 'approve_persistent', 'deny', 'up', 'down', 'enter']
+    actions: ['approve', 'approve_persistent', 'deny']
   });
   const fallbackMarkdown = fallbackCard.elements.find(
     (element) => element.tag === 'markdown'

@@ -199,9 +199,6 @@ function buildPermissionPanelMarkdown(panel = {}) {
         lines.push('', '**选项**', ...options);
       }
     }
-    if (panel.approval?.options?.length > 0) {
-      lines.push('', '上移/下移会切换 `>` 标记的选项，确认会选择当前项。');
-    }
     lines.push('', '可以点击下方按钮，或发送 `/approve`、`/always`、`/deny`。');
     return lines.join('\n');
   }
@@ -430,12 +427,12 @@ function buildStreamingPanelCard(panel = {}) {
     schema: '2.0',
     config: buildCardConfig({
       update_multi: true,
+      streaming_mode: false,
       summary: {
         content: panel.kind === 'permission'
           ? 'Remote Codex 等待权限确认'
           : 'Remote Codex 等待操作'
-      },
-      ...buildStreamingModeConfig()
+      }
     }),
     header: {
       template: getPanelTemplate(panel),
