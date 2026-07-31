@@ -57,6 +57,20 @@ starts.
 Release filenames use `x64` for portable archives and Debian's native `amd64`
 name for x64 `.deb` packages; ARM64 uses `arm64` for both.
 
+Remote Codex can update itself from GitHub Releases. In **Settings → Software
+Updates**, keep automatic updates enabled to check after startup, download the
+matching full Linux package in the background, and install it on normal exit.
+After the download completes, **Install and Restart** applies it immediately.
+Turn the option off to prevent background update checks and downloads; the
+manual **Check for Updates** action remains available.
+
+Debian installations download and verify the complete `.deb`, then use the
+desktop system-authorization flow to install it. User-local installations made
+by `install.sh` download the complete `.tar.gz`, verify its SHA-256 checksum,
+and reuse the installer's versioned directory plus atomic `current` symlink.
+Application code never runs a partial `.deb` patch. Development checkouts and
+unrecognized portable directories do not update themselves.
+
 For a more inspectable installation flow, download `install.sh`, review it,
 then run it locally instead of piping it directly to Bash.
 
@@ -264,7 +278,11 @@ If Codex is already working, another normal remote message is still written to
 the native Codex queue immediately. Remote Codex starts a separate rollout
 observer before the write, then opens that message's card after the preceding
 card closes, preserving response order without the old busy-rejection reply.
-Approval prompts and native picker pages remain blocking controls.
+Approval prompts and native picker pages remain blocking controls. Approval
+request content and lifecycle are read from the bound rollout JSONL and keyed
+by Codex `call_id`. Persisted allow prefixes are cross-checked against
+`~/.codex/rules/default.rules`; terminal snapshots are not parsed for approval
+cards.
 Feishu remote turns default to one CardKit entity per task. Ordered rollout
 `agent_message` events with `phase=commentary` accumulate in that card while it
 is blue and marked as processing. `phase=final_answer` replaces the body with
@@ -331,9 +349,9 @@ Codex session ID. Normal output is then read incrementally from the matching
 reports an explicit error and does not fall back to terminal text.
 
 Remote Codex does not record PTY input, output, or snapshots during normal
-operation. Normal response history already comes from Codex's official rollout
-JSONL files. For a native `/resume`, `/permission`, approval, resize, or TUI
-rendering bug, start Electron with explicit diagnostic capture:
+operation. Normal response history and approval events already come from
+Codex's official rollout JSONL files. For a native `/resume`, `/permission`,
+resize, or TUI rendering bug, start Electron with explicit diagnostic capture:
 
 ```bash
 REMOTE_CODEX_DIAGNOSTIC_CAPTURE=1 npm start
@@ -360,10 +378,11 @@ sample:
 npm run capture:export-fixture -- /path/to/raw-output.jsonl /tmp/capture.fixture.jsonl
 ```
 
-If Codex opens an approval prompt in visual terminal mode, Remote Codex sends a
-dedicated confirmation card with the command, reason, and visible options. Use
-the card buttons or send `/approve`, `/always`, or `/deny`. For selection-style
-prompts, `/up`, `/down`, and `/enter` pass through the matching terminal keys.
+When the bound rollout records a sandbox-authorization request, Remote Codex
+sends a dedicated confirmation card with the structured command and reason.
+Use the card buttons or send `/approve`, `/always`, or `/deny`; only the selected
+control key is written back to the visible TUI. Native selection pages still use
+`/up`, `/down`, and `/enter` to pass through the matching terminal keys.
 
 For advanced/manual Feishu setup, configure these in the config file:
 
@@ -431,7 +450,10 @@ scroll/page controls and `q`-style exit semantics. `/review` switches from the
 native preset picker to the next rollout JSONL task, so terminal repaint text
 never becomes review output. `/compact`, `/init`, `/side`, and `/plan` with an
 inline prompt also bind the next structured rollout task rather than matching
-the literal slash command in history.
+the literal slash command in history. Selecting Full Access from `/permission`
+automatically accepts Codex's recognized Full Access risk confirmation when
+the continue option is selected; unknown or cancel-selected pages remain
+interactive.
 
 Remote `/stop` and `/approve` keep their Remote Codex meanings. Use
 `/codex-stop` for Codex's background-terminal stop command and
@@ -463,6 +485,7 @@ FEISHU_ENABLED=1
 FEISHU_MODE=long_connection
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=xxx
+REMOTE_CODEX_AUTO_UPDATE=true
 ```
 
 Headless Feishu connect flow:

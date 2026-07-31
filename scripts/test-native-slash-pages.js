@@ -130,7 +130,7 @@ function testPermissionsPickerOutput() {
 
   assert.match(output, /^\*\*权限模式\*\*/);
   assert.match(output, /当前模式: `Default`/);
-  assert.match(output, /如果 Codex 显示安全确认，将继续在当前卡片中完成/);
+  assert.match(output, /选择 Full Access 时，已识别的安全确认会自动继续/);
   assert.match(output, /> 1\. Default \(current\)/);
   assert.match(output, /Approval is required to access the internet or edit other files\./);
   assert.match(output, /- 2\. Auto-review/);

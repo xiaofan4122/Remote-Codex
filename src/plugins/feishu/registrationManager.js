@@ -50,7 +50,7 @@ class FeishuRegistrationManager {
           status: 'complete',
           message: pluginError
             ? `Feishu credentials saved. Plugin start error: ${pluginError}`
-            : 'Feishu connected. Configure and publish the floating bot menu in the Feishu Developer Console.',
+            : 'Feishu connected and saved.',
           appId: result.client_id,
           userOpenId: result.user_info?.open_id || '',
           tenantBrand: result.user_info?.tenant_brand || '',

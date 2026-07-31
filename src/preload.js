@@ -5,10 +5,15 @@ contextBridge.exposeInMainWorld('codexShell', {
   chooseDirectory: () => ipcRenderer.invoke('session:choose-directory'),
   getConfig: () => ipcRenderer.invoke('config:get'),
   saveConfig: (config) => ipcRenderer.invoke('config:save', config),
+  completeOnboarding: (reason) => ipcRenderer.invoke('ui:onboarding-complete', reason),
   startFeishuConnect: (config) => ipcRenderer.invoke('feishu:connect-start', config),
   cancelFeishuConnect: () => ipcRenderer.invoke('feishu:connect-cancel'),
   getFeishuConnectStatus: () => ipcRenderer.invoke('feishu:connect-status'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  getUpdateStatus: () => ipcRenderer.invoke('updates:get-status'),
+  checkForUpdates: () => ipcRenderer.invoke('updates:check'),
+  downloadUpdate: () => ipcRenderer.invoke('updates:download'),
+  installUpdate: () => ipcRenderer.invoke('updates:install'),
   write: (data) => ipcRenderer.send('terminal:input', data),
   resize: (size) => ipcRenderer.send('terminal:resize', size),
   snapshot: (text) => ipcRenderer.send('terminal:snapshot', text),
@@ -31,5 +36,10 @@ contextBridge.exposeInMainWorld('codexShell', {
     const listener = (_event, status) => callback(status);
     ipcRenderer.on('feishu:connect-status', listener);
     return () => ipcRenderer.removeListener('feishu:connect-status', listener);
+  },
+  onUpdateStatus: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('updates:status', listener);
+    return () => ipcRenderer.removeListener('updates:status', listener);
   }
 });

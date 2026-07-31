@@ -4,7 +4,11 @@ const path = require('node:path');
 
 const defaultConfig = {
   ui: {
-    language: 'zh-CN'
+    language: 'zh-CN',
+    onboardingCompleted: false
+  },
+  updates: {
+    automaticEnabled: true
   },
   codex: {
     command: 'codex',
@@ -135,6 +139,9 @@ function getEnvConfig() {
     ui: {
       language: process.env.REMOTE_CODEX_LANGUAGE || process.env.CODEX_UI_LANGUAGE
     },
+    updates: {
+      automaticEnabled: parseBoolean(process.env.REMOTE_CODEX_AUTO_UPDATE)
+    },
     codex: {
       command: process.env.CODEX_COMMAND,
       args: parseList(process.env.CODEX_ARGS),
@@ -218,10 +225,15 @@ function normalizeConfig(config, configPath = getConfigPath()) {
   if (!isPlainObject(next.ui)) {
     next.ui = {};
   }
+  if (!isPlainObject(next.updates)) {
+    next.updates = deepMerge(defaultConfig.updates);
+  }
   next.remoteControl.outputMode = normalizeOutputMode(
     next.remoteControl.outputMode
   );
   next.ui.language = normalizeLanguage(next.ui.language);
+  next.ui.onboardingCompleted = next.ui.onboardingCompleted === true;
+  next.updates.automaticEnabled = next.updates.automaticEnabled !== false;
   next.remoteControl.responseSource = normalizeResponseSource(
     next.remoteControl.responseSource
   );
@@ -308,15 +320,21 @@ function normalizePositiveInteger(value, fallback, maximum) {
 
 function loadConfig(options = {}) {
   const configPath = options.configPath || getConfigPath();
+  const configFileExists = fs.existsSync(configPath);
   const fileConfig = readConfigFile(configPath);
-  return normalizeConfig(
+  const next = normalizeConfig(
     deepMerge(defaultConfig, fileConfig, getEnvConfig(), options.overrides),
     configPath
   );
+  next.ui.firstRun = !configFileExists;
+  return next;
 }
 
 function stripRuntimeFields(config) {
   const next = deepMerge(config);
+  if (next.ui) {
+    delete next.ui.firstRun;
+  }
   if (next.codex) {
     if (Object.prototype.hasOwnProperty.call(next.codex, 'configuredDefaultCwd')) {
       next.codex.defaultCwd = next.codex.configuredDefaultCwd || '';
@@ -340,11 +358,18 @@ function saveConfig(config, options = {}) {
   return loadConfig({ configPath });
 }
 
+function saveConfigPatch(patch, options = {}) {
+  const configPath = options.configPath || getConfigPath();
+  const fileConfig = readConfigFile(configPath);
+  return saveConfig(deepMerge(fileConfig, patch), { configPath });
+}
+
 module.exports = {
   defaultConfig,
   deepMerge,
   getConfigPath,
   loadConfig,
   normalizeConfig,
-  saveConfig
+  saveConfig,
+  saveConfigPatch
 };

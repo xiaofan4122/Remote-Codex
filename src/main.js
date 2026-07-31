@@ -1,6 +1,6 @@
 const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
 const path = require('node:path');
-const { loadConfig, saveConfig } = require('./config');
+const { loadConfig, saveConfig, saveConfigPatch } = require('./config');
 const {
   CodexSessionManager,
   isCodexUpdateSuccessOutput
@@ -19,6 +19,7 @@ const { buildRemoteInputNotice } = require('./remoteVisualNotice');
 const { installBundledSkill } = require('./bundledSkillInstaller');
 const { configureSingleInstance } = require('./singleInstanceCoordinator');
 const { connectOrReconnectFeishu } = require('./feishuConnectionCoordinator');
+const { createAppUpdateManager } = require('./appUpdateManager');
 
 let mainWindow;
 let currentSession;
@@ -26,6 +27,7 @@ let config = loadConfig();
 let remoteController;
 let pluginManager;
 let feishuRegistrationManager;
+let appUpdateManager;
 let signalShutdownStarted = false;
 const launchOptions = parseLaunchOptions();
 const CODEX_UPDATE_RESTART_DELAY_MS = 1200;
@@ -184,6 +186,7 @@ async function applyFeishuRegistration(result) {
 
   nextConfig.plugins.feishu = feishu;
   config = saveConfig(nextConfig);
+  appUpdateManager?.updateConfig(config);
   manager.updateConfig(config);
   execRunner.updateConfig(config);
   appServerRunner.updateConfig(config);
@@ -338,6 +341,11 @@ if (!hasSingleInstanceLock) {
   app.whenReady().then(() => {
     createPluginRuntime();
     createWindow();
+    appUpdateManager = createAppUpdateManager({ app, config, logger });
+    appUpdateManager.subscribe((status) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      mainWindow.webContents.send('updates:status', status);
+    });
 
   ipcMain.handle('session:start', (_event, cwd) => {
     startCodex(cwd || config.codex.defaultCwd);
@@ -363,6 +371,7 @@ if (!hasSingleInstanceLock) {
 
   ipcMain.handle('config:save', async (_event, nextConfig) => {
     config = saveConfig(nextConfig || config);
+    appUpdateManager?.updateConfig(config);
     manager.updateConfig(config);
     execRunner.updateConfig(config);
     appServerRunner.updateConfig(config);
@@ -379,6 +388,17 @@ if (!hasSingleInstanceLock) {
     return { config, pluginError };
   });
 
+  ipcMain.handle('ui:onboarding-complete', (_event, reason) => {
+    config = saveConfigPatch({
+      ui: { onboardingCompleted: true }
+    }, { configPath: config.configPath });
+    mainWindow?.webContents.send('config:updated', config);
+    logger.event?.('ui.onboarding.completed', {
+      reason: String(reason || 'completed').slice(0, 80)
+    });
+    return config;
+  });
+
   ipcMain.handle('feishu:connect-start', async (_event, nextConfig) => {
     if (nextConfig && typeof nextConfig === 'object') {
       const nextFeishu = nextConfig.plugins?.feishu;
@@ -387,6 +407,7 @@ if (!hasSingleInstanceLock) {
         nextFeishu.mode = 'long_connection';
       }
       config = saveConfig(nextConfig);
+      appUpdateManager?.updateConfig(config);
       manager.updateConfig(config);
       execRunner.updateConfig(config);
       appServerRunner.updateConfig(config);
@@ -421,6 +442,20 @@ if (!hasSingleInstanceLock) {
     return { ok: true };
   });
 
+  ipcMain.handle('updates:get-status', () => appUpdateManager?.getState() || null);
+
+  ipcMain.handle('updates:check', () => {
+    return appUpdateManager?.check({ manual: true }) || null;
+  });
+
+  ipcMain.handle('updates:download', () => {
+    return appUpdateManager?.download() || null;
+  });
+
+  ipcMain.handle('updates:install', () => {
+    return appUpdateManager?.installAndRestart() || null;
+  });
+
   ipcMain.on('terminal:input', (_event, data) => {
     currentSession?.write(data);
   });
@@ -436,6 +471,7 @@ if (!hasSingleInstanceLock) {
 
   mainWindow.webContents.once('did-finish-load', () => {
     startCodex(config.codex.defaultCwd);
+    appUpdateManager?.start();
     runVisualSmokeTestIfRequested();
   });
 
@@ -451,6 +487,7 @@ if (!hasSingleInstanceLock) {
 }
 
 app.on('before-quit', () => {
+  appUpdateManager?.stop();
   feishuRegistrationManager?.cancel();
   pluginManager?.stopAll().catch((error) => {
     console.error('Failed to stop plugins:', error);

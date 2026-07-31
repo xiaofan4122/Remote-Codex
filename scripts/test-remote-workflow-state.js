@@ -39,7 +39,7 @@ async function main() {
   await testClosedNativeStreamDoesNotSendTrailingPanel();
   await testNativeNavigationAllowsOriginalPanelRefresh();
   await testPermissionModeButtonSelectsAndConfirms();
-  await testPermissionFollowupReusesStreamingCard();
+  await testPermissionFullAccessAutoConfirmsOnStreamingCard();
   await testGenericModelPickerNavigationAndCompletion();
   await testReviewPickerTransitionsToNextRolloutTask();
   await testNativeReportCompletesAndReleasesNextInput();
@@ -727,9 +727,10 @@ function testSessionPhases() {
   state.session.visualViewportSnapshot = 'Booting MCP server: docs';
   assert.equal(controller.refreshSessionPhase(state), 'loading_plugins');
 
-  state.session.visualViewportSnapshot = approvalLines();
+  state.pendingRolloutApproval = rolloutApproval();
   assert.equal(controller.refreshSessionPhase(state), 'awaiting_authorization');
 
+  state.pendingRolloutApproval = null;
   state.session.visualViewportSnapshot = 'Resume a previous session';
   state.nativeCommand = { command: '/resume' };
   assert.equal(controller.refreshSessionPhase(state), 'native_resume');
@@ -741,7 +742,7 @@ async function testApprovalPanelFailureFallsBackOnlyOnce() {
   const staticPanels = [];
   const invalidStreamFallbacks = [];
   const state = createState({
-    snapshot: approvalLines(),
+    snapshot: '•ngg5WWo•Wor•WorkWorki terminal approval garbage',
     turnStartedAt: Date.now()
   });
   state.replyPanel = async (panel) => {
@@ -761,6 +762,12 @@ async function testApprovalPanelFailureFallsBackOnlyOnce() {
   };
   controller.sessions.set('feishu:chat', state);
 
+  await controller.handleRolloutEvent(state, {
+    type: 'authorization_requested',
+    callId: 'call-fallback-once',
+    turnId: 'turn-fallback-once',
+    approval: rolloutApproval('call-fallback-once')
+  });
   for (let index = 0; index < 8; index += 1) {
     controller.queueOutput(state, 'approval repaint');
     await wait(4);
@@ -1393,34 +1400,23 @@ async function testPermissionModeButtonSelectsAndConfirms() {
   fullAccessState.session.visualSnapshot = fullAccessConfirmationSnapshot('continue');
   fullAccessState.session.visualViewportSnapshot = fullAccessState.session.visualSnapshot;
   controller.queueOutput(fullAccessState, 'full access confirmation opened');
-  await wait(10);
+  await wait(20);
 
   assert.equal(fullAccessState.nativeCommand.command, '/permissions');
   assert.equal(fullAccessState.nativePageAction.completionAction, 'permission_full_access');
-  assert.equal(panels.length, 1);
-  assert.equal(panels[0].active, true);
-  assert.equal(panels[0].completed, undefined);
-  assert.match(panels[0].content, /确认启用 Full Access/);
-  assert.match(panels[0].content, /当前选择：继续启用/);
-  assert.doesNotMatch(panels[0].content, /Enable full access|Yes, continue anyway/);
-  assert.deepEqual(panels[0].actions, ['up', 'down', 'enter', 'escape']);
-
-  await controller.sendControlInput(
-    'feishu:chat',
-    {
-      pluginId: 'feishu',
-      conversationId: 'chat',
-      userId: 'user',
-      pageContext: '/permissions',
-      reply: async () => {},
-      replyPanel: fullAccessState.replyPanel
-    },
-    'enter'
-  );
-
   assert.deepEqual(writes, ['\x1b[B', '\x1b[B', '\r', '\r']);
-  assert.equal(fullAccessState.nativePageAction.action, 'enter');
+  assert.equal(panels.length, 0);
+  assert.ok(fullAccessState.nativePageAction.autoConfirmationSubmittedAt > 0);
+  assert.equal(fullAccessState.nativePageAction.action, 'permission_full_access');
   assert.equal(fullAccessState.nativePageAction.completionAction, 'permission_full_access');
+
+  controller.queueOutput(fullAccessState, 'full access confirmation repaint');
+  await wait(10);
+  assert.deepEqual(
+    writes,
+    ['\x1b[B', '\x1b[B', '\r', '\r'],
+    'repainting the same confirmation must not submit Enter twice'
+  );
 
   fullAccessState.session.visualSnapshot = `${fullAccessConfirmationSnapshot('continue')}\n› `;
   fullAccessState.session.visualViewportSnapshot = fullAccessState.session.visualSnapshot;
@@ -1428,10 +1424,10 @@ async function testPermissionModeButtonSelectsAndConfirms() {
   await wait(10);
 
   assert.equal(fullAccessState.nativeCommand, null);
-  assert.equal(panels.length, 2);
-  assert.match(panels[1].content, /权限模式已更新/);
-  assert.match(panels[1].content, /`Full Access`/);
-  assert.deepEqual(panels[1].actions, []);
+  assert.equal(panels.length, 1);
+  assert.match(panels[0].content, /权限模式已更新/);
+  assert.match(panels[0].content, /`Full Access`/);
+  assert.deepEqual(panels[0].actions, []);
 
   writes.length = 0;
   panels.length = 0;
@@ -1457,27 +1453,14 @@ async function testPermissionModeButtonSelectsAndConfirms() {
     },
     'permission_full_access'
   );
-  cancelledState.session.visualSnapshot = fullAccessConfirmationSnapshot('continue');
-  cancelledState.session.visualViewportSnapshot = cancelledState.session.visualSnapshot;
-  controller.queueOutput(cancelledState, 'full access confirmation opened');
-  await wait(10);
-
-  await controller.sendControlInput(
-    'feishu:chat',
-    {
-      pluginId: 'feishu',
-      conversationId: 'chat',
-      userId: 'user',
-      pageContext: '/permissions',
-      reply: async () => {},
-      replyPanel: cancelledState.replyPanel
-    },
-    'down'
-  );
   cancelledState.session.visualSnapshot = fullAccessConfirmationSnapshot('cancel');
   cancelledState.session.visualViewportSnapshot = cancelledState.session.visualSnapshot;
-  controller.queueOutput(cancelledState, 'cancel selected');
+  controller.queueOutput(cancelledState, 'full access confirmation opened with cancel selected');
   await wait(10);
+
+  assert.deepEqual(writes, ['\x1b[B', '\x1b[B', '\r']);
+  assert.equal(panels.length, 1);
+  assert.match(panels[0].content, /当前选择：取消/);
 
   await controller.sendControlInput(
     'feishu:chat',
@@ -1554,7 +1537,7 @@ async function testPermissionModeButtonSelectsAndConfirms() {
   assert.equal(loadingState.nativePageAction.action, 'permission_full_access');
 }
 
-async function testPermissionFollowupReusesStreamingCard() {
+async function testPermissionFullAccessAutoConfirmsOnStreamingCard() {
   const controller = createController();
   const writes = [];
   const staticPanels = [];
@@ -1603,27 +1586,12 @@ async function testPermissionFollowupReusesStreamingCard() {
   state.session.visualSnapshot = fullAccessConfirmationSnapshot('continue');
   state.session.visualViewportSnapshot = state.session.visualSnapshot;
   controller.queueOutput(state, 'full access confirmation opened');
-  await wait(10);
+  await wait(20);
 
-  assert.equal(shownPanels.length, 1);
+  assert.equal(shownPanels.length, 0);
   assert.equal(staticPanels.length, 0);
-  assert.equal(shownPanels[0].title, 'Remote Codex · 确认 Full Access');
-  assert.match(shownPanels[0].content, /确认启用 Full Access/);
-  assert.match(shownPanels[0].content, /当前选择：继续启用/);
-  assert.doesNotMatch(shownPanels[0].content, /Enable full access|Yes, continue anyway/);
-
-  await controller.sendControlInput(
-    'feishu:chat',
-    {
-      pluginId: 'feishu',
-      conversationId: 'chat',
-      userId: 'user',
-      pageContext: '/permissions',
-      reply: async () => {},
-      replyPanel: state.replyPanel
-    },
-    'enter'
-  );
+  assert.deepEqual(writes, ['\x1b[B', '\x1b[B', '\r', '\r']);
+  assert.ok(state.nativePageAction.autoConfirmationSubmittedAt > 0);
   state.session.visualSnapshot = `${fullAccessConfirmationSnapshot('continue')}\n› `;
   state.session.visualViewportSnapshot = state.session.visualSnapshot;
   controller.queueOutput(state, 'permissions closed');
@@ -2083,6 +2051,10 @@ function createState(options = {}) {
     sentSegmentSignatures: new Set(),
     nativePanelUpdateRequested: false,
     controlActionLocks: new Map(),
+    pendingRolloutApproval: null,
+    rolloutApprovalQueue: [],
+    rolloutApprovalCallIds: new Set(),
+    completedRolloutApprovalCallIds: new Set(),
     lastApprovalSignature: '',
     submittedApprovalSignature: '',
     submittedApprovalAt: 0,
@@ -2244,6 +2216,23 @@ function approvalLines() {
     '> 1. Yes',
     '  2. No'
   ].join('\n');
+}
+
+function rolloutApproval(callId = 'call-test-approval') {
+  return {
+    id: callId,
+    callId,
+    source: 'rollout_jsonl',
+    turnId: 'turn-test-approval',
+    question: '是否允许执行以下操作？',
+    reason: 'Reason: verify',
+    command: 'npm test',
+    options: [
+      { selected: true, index: 1, text: 'Yes, proceed (y)' },
+      { selected: false, index: 2, text: "Yes, and don't ask again (p)" },
+      { selected: false, index: 3, text: 'No (esc)' }
+    ]
+  };
 }
 
 function wait(ms) {

@@ -63,6 +63,12 @@ never a fallback source for normal progress or final answers.
   `src/codexExecRunner.js` support headless/API or structured-output paths.
   Keep behavior differences explicit; do not assume app-server behavior mirrors
   the visible TUI.
+- `src/appUpdateManager.js` owns the renderer-facing update state machine and
+  selects the packaged Linux update backend. Debian packages use
+  `electron-updater`; managed user-local archives use `src/linuxTarUpdater.js`
+  to download the complete release, verify SHA-256, and reuse `install.sh`'s
+  atomic version-directory switch. Development and unknown portable layouts
+  must remain non-installing.
 
 ## Development Principles
 
@@ -258,6 +264,8 @@ location is unsuitable.
 ## Configuration Notes
 
 - Defaults live in `src/config.js`; examples live in `config.example.json`.
+- `updates.automaticEnabled` controls startup checks, background downloads, and
+  install-on-exit. Manual checks remain available when it is disabled.
 - Runtime config is loaded from environment, then config file, then defaults.
   The default file is `~/.remote-codex.json`; legacy `CODEX_SHELL_CONFIG` and
   `~/.codex-electron-shell.json` are still supported.
@@ -299,6 +307,7 @@ npm run test:skill-install
 npm run test:latex-renderer
 npm run test:feishu-latex
 npm run test:settings-ui
+npm run test:app-updates
 npm run smoke:feishu-rich-text
 git diff --check
 ```

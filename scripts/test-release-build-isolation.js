@@ -17,6 +17,10 @@ const releaseWorkflow = fs.readFileSync(
   path.join(projectRoot, '.github', 'workflows', 'release.yml'),
   'utf8'
 );
+const builderConfig = fs.readFileSync(
+  path.join(projectRoot, 'electron-builder.yml'),
+  'utf8'
+);
 
 assert.match(script, /REMOTE_CODEX_BUILD_WORK_DIR=.*mktemp -d/);
 assert.match(script, /REMOTE_CODEX_PROJECT_ROOT}:\/source:ro/);
@@ -28,6 +32,13 @@ assert.doesNotMatch(script, /REMOTE_CODEX_PROJECT_ROOT}:\/workspace/);
 assert.match(script, /REMOTE_CODEX_DOCKER_STATUS.*-ne 125/s);
 assert.match(ciWorkflow, /apt-get install[^\n]+fonts-noto-cjk/);
 assert.match(releaseWorkflow, /apt-get install[^\n]+fonts-noto-cjk/);
+assert.match(script, /REMOTE_CODEX_UPDATE_METADATA=latest-linux\.yml/);
+assert.match(script, /REMOTE_CODEX_UPDATE_METADATA=latest-linux-arm64\.yml/);
+assert.match(releaseWorkflow, /release-assets\/latest-linux\.yml/);
+assert.match(releaseWorkflow, /release-assets\/latest-linux-arm64\.yml/);
+assert.match(builderConfig, /provider: github/);
+assert.match(builderConfig, /repo: Remote-Codex/);
+assert.match(builderConfig, /to: install\/install-linux\.sh/);
 
 const retried = runContainerScriptWithMockDocker('retry');
 assert.equal(retried.status, 0, retried.stderr);

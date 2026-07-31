@@ -3,7 +3,14 @@ set -Eeuo pipefail
 
 REMOTE_CODEX_SMOKE_ARCH="${1:-}"
 case "${REMOTE_CODEX_SMOKE_ARCH}" in
-  x64|arm64) ;;
+  x64)
+    REMOTE_CODEX_SMOKE_DEB_ARCH=amd64
+    REMOTE_CODEX_SMOKE_UPDATE_METADATA=latest-linux.yml
+    ;;
+  arm64)
+    REMOTE_CODEX_SMOKE_DEB_ARCH=arm64
+    REMOTE_CODEX_SMOKE_UPDATE_METADATA=latest-linux-arm64.yml
+    ;;
   *)
     printf 'Usage: %s <x64|arm64> [version]\n' "$0" >&2
     exit 1
@@ -62,6 +69,20 @@ if printf '%s\n' "${REMOTE_CODEX_SMOKE_LDD_OUTPUT}" | rg -q 'not found'; then
   printf 'Packaged node-pty has unresolved shared libraries.\n' >&2
   exit 1
 fi
+
+REMOTE_CODEX_SMOKE_DEB="${REMOTE_CODEX_SMOKE_PROJECT_ROOT}/dist/remote-codex-linux-${REMOTE_CODEX_SMOKE_DEB_ARCH}.deb"
+REMOTE_CODEX_SMOKE_METADATA="${REMOTE_CODEX_SMOKE_PROJECT_ROOT}/dist/${REMOTE_CODEX_SMOKE_UPDATE_METADATA}"
+REMOTE_CODEX_SMOKE_DEB_ROOT="${REMOTE_CODEX_SMOKE_ROOT}/deb-root"
+test -f "${REMOTE_CODEX_SMOKE_DEB}"
+test -f "${REMOTE_CODEX_SMOKE_METADATA}"
+dpkg-deb --info "${REMOTE_CODEX_SMOKE_DEB}" >/dev/null
+dpkg-deb -x "${REMOTE_CODEX_SMOKE_DEB}" "${REMOTE_CODEX_SMOKE_DEB_ROOT}"
+REMOTE_CODEX_SMOKE_DEB_RESOURCES="${REMOTE_CODEX_SMOKE_DEB_ROOT}/opt/Remote Codex/resources"
+test "$(tr -d '[:space:]' < "${REMOTE_CODEX_SMOKE_DEB_RESOURCES}/package-type")" = deb
+test -x "${REMOTE_CODEX_SMOKE_DEB_RESOURCES}/install/install-linux.sh"
+rg -q '^provider: github$' "${REMOTE_CODEX_SMOKE_DEB_RESOURCES}/app-update.yml"
+rg -q "^version: ${REMOTE_CODEX_SMOKE_VERSION}$" "${REMOTE_CODEX_SMOKE_METADATA}"
+rg -q "remote-codex-linux-${REMOTE_CODEX_SMOKE_DEB_ARCH}\\.deb" "${REMOTE_CODEX_SMOKE_METADATA}"
 
 env \
   HOME="${REMOTE_CODEX_SMOKE_HOME}" \

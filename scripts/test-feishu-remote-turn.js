@@ -17,6 +17,7 @@ async function main() {
   await testInvalidFinalFileDirectiveIsReportedOnOriginalCard();
   await testFileUploadFailureIsReportedOnOriginalCard();
   await testApprovalSnapshotUpdatesOriginalCardImmediately();
+  await testConsecutiveRolloutApprovalsIgnoreTerminalGarbage();
   await testTerminalRepaintsCannotBecomeRemoteMessages();
   await testResumeGenerationCannotReplayPreviousTurn();
   await testCardKitStreamingUsesRolloutSegmentsAndFinalOnly();
@@ -438,18 +439,12 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
   });
   await waitUntil(() => harness.updates.length >= 1);
 
-  const approvalSnapshot = [
-    `› ${prompt}`,
-    'Running shell command',
-    'Would you like to run the following command?',
-    'Reason: verify the release',
-    '$ npm test',
-    '> 1. Yes',
-    '  2. No'
-  ].join('\n');
-  harness.session.visualSnapshot = approvalSnapshot;
-  harness.session.visualViewportSnapshot = approvalSnapshot;
-  harness.session.emit('snapshot', { viewport: approvalSnapshot });
+  firstTurn.emit(authorizationRequested(
+    'call-feishu-approval',
+    'turn-approval',
+    'npm test',
+    'verify the release'
+  ));
 
   await waitUntil(() => harness.cardReplacements.length === 1);
   const approvalCard = parseClosedStreamingCard(harness.cardReplacements[0]);
@@ -503,17 +498,26 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
   assert.equal(harness.cardMessages.length, 1);
   assert.equal(harness.textFallbacks.length, 0);
 
-  const selectionOnlyRepaint = approvalSnapshot
-    .replace('> 1. Yes', '  1. Yes')
-    .replace('  2. No', '> 2. No');
-  harness.session.visualSnapshot = selectionOnlyRepaint;
-  harness.session.visualViewportSnapshot = selectionOnlyRepaint;
-  harness.session.emit('snapshot', { viewport: selectionOnlyRepaint });
+  const corruptedTerminalApproval = [
+    `› ${prompt}`,
+    '•ngg5WWo•Wor•WorkWorki',
+    'Reason: terminal garbage must never be sent',
+    '$ printf corrupted-terminal-command',
+    '> 2. No'
+  ].join('\n');
+  harness.session.emitOutput({
+    data: '•ngg5WWo•Wor•WorkWorki approval repaint',
+    snapshot: corruptedTerminalApproval
+  });
   await wait(30);
   assert.equal(
     harness.cardReplacements.length,
     1,
-    'changing only the native selection must not create another approval card'
+    'terminal approval text must not create or replace a rollout approval card'
+  );
+  assert.doesNotMatch(
+    streamingCardMarkdown(parseClosedStreamingCard(harness.cardReplacements[0])),
+    /terminal garbage|corrupted-terminal-command|ngg5WWo/
   );
 
   await harness.plugin.handleReceiveMessage(
@@ -522,12 +526,14 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
   await wait(30);
   assert.equal(harness.cardCreates.length, 1);
   assert.equal(harness.cardMessages.length, 1);
+
   assert.equal(harness.cardReplacements.length, 1);
 
   await harness.plugin.handleCardAction(
     feishuApprovalAction('approve', approvalContext)
   );
   await waitUntil(() => harness.cardReplacements.length === 2);
+  await waitUntil(() => harness.session.writes.at(-1) === 'y');
   const submittedCard = parseClosedStreamingCard(harness.cardReplacements[1]);
   assert.equal(submittedCard.header.template, 'blue');
   assert.equal(
@@ -543,6 +549,15 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
   assert.equal(harness.session.writes.at(-1), 'y');
   assert.equal(harness.cardCreates.length, 1);
   assert.equal(harness.cardMessages.length, 1);
+
+  firstTurn.emit({
+    type: 'authorization_completed',
+    callId: 'call-feishu-approval',
+    turnId: 'turn-approval'
+  });
+  await waitUntil(() => (
+    harness.controller.sessions.get('feishu:oc_chat')?.pendingRolloutApproval === null
+  ));
 
   await harness.plugin.handleReceiveMessage(
     feishuMessage('授权后立即追加的任务', 'om_after_approval')
@@ -571,6 +586,96 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
   assert.equal(
     streamingCardMarkdown(parseClosedStreamingCard(harness.closes[1])),
     '追加任务已正常完成。'
+  );
+  cleanupHarness(harness);
+}
+
+async function testConsecutiveRolloutApprovalsIgnoreTerminalGarbage() {
+  const harness = createHarness();
+  const prompt = '连续授权回归';
+  await harness.plugin.handleReceiveMessage(
+    feishuMessage(prompt, 'om_consecutive_approvals')
+  );
+  await waitUntil(() => harness.cardCreates.length === 1);
+  const turn = harness.rolloutReader.latest();
+  turn.emit(boundEvent('session-consecutive', 'turn-consecutive'));
+  turn.emit({ type: 'turn_started', turnId: 'turn-consecutive' });
+
+  turn.emit(authorizationRequested(
+    'call-consecutive-first',
+    'turn-consecutive',
+    'sudo -n /usr/bin/true',
+    'first clean approval'
+  ));
+  await waitUntil(() => harness.cardReplacements.length === 1);
+  const firstCard = parseClosedStreamingCard(harness.cardReplacements[0]);
+  const firstContext = buttonCallbackValue(streamingCardButtons(firstCard)[0])
+    .remote_codex_context;
+  assert.match(streamingCardMarkdown(firstCard), /first clean approval/);
+  assert.match(streamingCardMarkdown(firstCard), /sudo -n \/usr\/bin\/true/);
+
+  harness.session.emitOutput({
+    data: '•ngg5WWo•Wor•WorkWorki',
+    snapshot: [
+      'Would you like to run?',
+      'Reason: corrupted repaint',
+      '$ terminal-corrupted-command'
+    ].join('\n')
+  });
+  await wait(30);
+  assert.equal(harness.cardReplacements.length, 1);
+
+  turn.emit({
+    type: 'authorization_completed',
+    callId: 'call-consecutive-first',
+    turnId: 'turn-consecutive'
+  });
+  turn.emit(authorizationRequested(
+    'call-consecutive-second',
+    'turn-consecutive',
+    'xdotool windowactivate 42',
+    'second clean approval'
+  ));
+  await waitUntil(() => harness.cardReplacements.length === 2);
+
+  const secondCard = parseClosedStreamingCard(harness.cardReplacements[1]);
+  const secondMarkdown = streamingCardMarkdown(secondCard);
+  const secondContext = buttonCallbackValue(streamingCardButtons(secondCard)[0])
+    .remote_codex_context;
+  assert.match(secondMarkdown, /second clean approval/);
+  assert.match(secondMarkdown, /xdotool windowactivate 42/);
+  assert.doesNotMatch(
+    secondMarkdown,
+    /first clean approval|corrupted repaint|terminal-corrupted-command|ngg5WWo/
+  );
+  assert.notEqual(secondContext, firstContext);
+  assert.equal(harness.cardCreates.length, 1);
+  assert.equal(harness.cardMessages.length, 1);
+
+  turn.emit(authorizationRequested(
+    'call-consecutive-second',
+    'turn-consecutive',
+    'must not replace the card',
+    'duplicate request'
+  ));
+  await wait(30);
+  assert.equal(harness.cardReplacements.length, 2);
+
+  turn.emit({
+    type: 'authorization_completed',
+    callId: 'call-consecutive-second',
+    turnId: 'turn-consecutive'
+  });
+  turn.emit({ type: 'final', text: '连续授权任务完成。' });
+  turn.emit({
+    type: 'turn_complete',
+    turnId: 'turn-consecutive',
+    finalText: '连续授权任务完成。'
+  });
+  await waitUntil(() => harness.closes.length === 1);
+  assert.equal(
+    streamingCardMarkdown(parseClosedStreamingCard(harness.closes[0])),
+    '连续授权任务完成。'
   );
   cleanupHarness(harness);
 }
@@ -1015,6 +1120,28 @@ function boundEvent(sessionId, turnId) {
     rolloutPath: `/tmp/rollout-${sessionId}.jsonl`,
     cwd: process.cwd(),
     cliVersion: '0.142.5'
+  };
+}
+
+function authorizationRequested(callId, turnId, command, justification) {
+  return {
+    type: 'authorization_requested',
+    callId,
+    turnId,
+    approval: {
+      id: callId,
+      callId,
+      source: 'rollout_jsonl',
+      turnId,
+      question: '是否允许执行以下操作？',
+      reason: `Reason: ${justification}`,
+      command,
+      options: [
+        { selected: true, index: 1, text: 'Yes, proceed (y)' },
+        { selected: false, index: 2, text: "Yes, and don't ask again (p)" },
+        { selected: false, index: 3, text: 'No (esc)' }
+      ]
+    }
   };
 }
 

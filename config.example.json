@@ -2,6 +2,9 @@
   "ui": {
     "language": "zh-CN"
   },
+  "updates": {
+    "automaticEnabled": true
+  },
   "codex": {
     "defaultCwd": ""
   },

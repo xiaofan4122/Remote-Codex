@@ -6,6 +6,13 @@ directories:
   output: dist
   buildResources: build
 
+publish:
+  provider: github
+  owner: xiaofan4122
+  repo: Remote-Codex
+
+electronUpdaterCompatibility: ">= 2.16"
+
 files:
   - src/**/*
   - package.json
@@ -27,6 +34,8 @@ extraResources:
       - "**/*"
   - from: scripts/uninstall-linux.sh
     to: install/uninstall-linux.sh
+  - from: install.sh
+    to: install/install-linux.sh
   - from: build/icons/512x512.png
     to: icon.png
 

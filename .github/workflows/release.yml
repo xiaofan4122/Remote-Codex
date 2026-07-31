@@ -64,6 +64,7 @@ jobs:
             dist/remote-codex-linux-${{ matrix.arch }}.tar.gz.sha256
             dist/remote-codex-linux-${{ matrix.deb_arch }}.deb
             dist/remote-codex-linux-${{ matrix.deb_arch }}.deb.sha256
+            dist/latest-linux*.yml
           if-no-files-found: error
           retention-days: 3
 
@@ -109,4 +110,6 @@ jobs:
           release-assets/remote-codex-linux-arm64.tar.gz.sha256
           release-assets/remote-codex-linux-arm64.deb
           release-assets/remote-codex-linux-arm64.deb.sha256
+          release-assets/latest-linux.yml
+          release-assets/latest-linux-arm64.yml
           install.sh

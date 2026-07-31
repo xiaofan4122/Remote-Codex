@@ -636,6 +636,16 @@ class RemoteSessionController {
 
   async handleRolloutEvent(state, event = {}) {
     const type = String(event.type || '');
+    if (type === 'authorization_requested') {
+      await this.handleRolloutAuthorizationRequested(state, event);
+      return;
+    }
+
+    if (type === 'authorization_completed') {
+      await this.handleRolloutAuthorizationCompleted(state, event);
+      return;
+    }
+
     if (type === 'bound') {
       this.activateNativePickerTaskRollout(state, event);
       state.rolloutSessionId = String(event.sessionId || '');
@@ -710,6 +720,146 @@ class RemoteSessionController {
       decision: state.rolloutFinalQueued ? 'complete_rollout_turn' : 'complete_without_final'
     });
     this.finishRolloutTurn(state);
+  }
+
+  async handleRolloutAuthorizationRequested(state, event = {}) {
+    const callId = String(event.callId || event.approval?.callId || '').trim();
+    if (!callId) return;
+    if (!(state.rolloutApprovalCallIds instanceof Set)) {
+      state.rolloutApprovalCallIds = new Set();
+    }
+    if (!Array.isArray(state.rolloutApprovalQueue)) {
+      state.rolloutApprovalQueue = [];
+    }
+    if (state.rolloutApprovalCallIds.has(callId)) {
+      this.logger.event?.('remote.approval.rollout.ignored', {
+        pluginId: state.pluginId,
+        conversationId: state.conversationId,
+        sessionId: state.session?.id || '',
+        callId,
+        reason: 'duplicate_request'
+      });
+      return;
+    }
+
+    state.rolloutApprovalCallIds.add(callId);
+    const approval = {
+      ...(event.approval || {}),
+      id: callId,
+      callId,
+      source: 'rollout_jsonl',
+      turnId: String(event.turnId || event.approval?.turnId || '')
+    };
+    if (state.pendingRolloutApproval) {
+      state.rolloutApprovalQueue.push(approval);
+      this.logger.event?.('remote.approval.rollout.queued', {
+        pluginId: state.pluginId,
+        conversationId: state.conversationId,
+        sessionId: state.session?.id || '',
+        callId,
+        queueLength: state.rolloutApprovalQueue.length
+      });
+      return;
+    }
+
+    await this.activateRolloutApproval(state, approval);
+  }
+
+  async handleRolloutAuthorizationCompleted(state, event = {}) {
+    const callId = String(event.callId || '').trim();
+    if (!callId) return;
+    if (!(state.completedRolloutApprovalCallIds instanceof Set)) {
+      state.completedRolloutApprovalCallIds = new Set();
+    }
+    if (!Array.isArray(state.rolloutApprovalQueue)) {
+      state.rolloutApprovalQueue = [];
+    }
+    if (state.completedRolloutApprovalCallIds.has(callId)) return;
+    state.completedRolloutApprovalCallIds.add(callId);
+
+    state.rolloutApprovalQueue = state.rolloutApprovalQueue.filter(
+      (approval) => approval.callId !== callId
+    );
+    if (state.pendingRolloutApproval?.callId !== callId) {
+      this.logger.event?.('remote.approval.rollout.completed', {
+        pluginId: state.pluginId,
+        conversationId: state.conversationId,
+        sessionId: state.session?.id || '',
+        callId,
+        active: false
+      });
+      return;
+    }
+
+    state.pendingRolloutApproval = null;
+    state.lastApprovalSignature = '';
+    state.lastApprovalAttemptSignature = '';
+    state.submittedApprovalSignature = '';
+    state.submittedApprovalAt = 0;
+    state.approvalPanelRetryAt = 0;
+    this.refreshSessionPhase(state, 'rollout_authorization_completed');
+    this.logger.event?.('remote.approval.rollout.completed', {
+      pluginId: state.pluginId,
+      conversationId: state.conversationId,
+      sessionId: state.session?.id || '',
+      callId,
+      active: true,
+      queueLength: state.rolloutApprovalQueue.length
+    });
+    this.recordParserTrace(state, {
+      source: 'rollout_jsonl',
+      reason: 'authorization_completed',
+      rolloutEvent: event,
+      decision: 'clear_rollout_authorization'
+    });
+
+    const next = state.rolloutApprovalQueue.shift();
+    if (next) await this.activateRolloutApproval(state, next);
+  }
+
+  async activateRolloutApproval(state, approval) {
+    state.pendingRolloutApproval = approval;
+    state.lastApprovalSignature = '';
+    state.lastApprovalAttemptSignature = '';
+    state.submittedApprovalSignature = '';
+    state.submittedApprovalAt = 0;
+    state.approvalPanelRetryAt = 0;
+    this.refreshSessionPhase(state, 'rollout_authorization_requested');
+
+    const signature = approvalPromptSignature(approval);
+    const panel = this.buildPermissionPanelPayload(
+      state.key,
+      null,
+      state,
+      approval
+    );
+    const presented = await this.presentApprovalPanel(
+      state,
+      panel,
+      signature,
+      { force: true }
+    );
+    this.logger.event?.('remote.approval.rollout.presented', {
+      pluginId: state.pluginId,
+      conversationId: state.conversationId,
+      sessionId: state.session?.id || '',
+      callId: approval.callId,
+      turnId: approval.turnId || '',
+      presented
+    });
+    this.recordParserTrace(state, {
+      source: 'rollout_jsonl',
+      reason: 'authorization_requested',
+      rolloutEvent: {
+        type: 'authorization_requested',
+        callId: approval.callId,
+        turnId: approval.turnId || ''
+      },
+      formatted: formatApprovalPrompt(approval),
+      decision: presented
+        ? 'present_rollout_authorization'
+        : 'rollout_authorization_presentation_failed'
+    });
   }
 
   async sendRolloutFailure(state, detail) {
@@ -948,6 +1098,8 @@ class RemoteSessionController {
     state.rolloutFinished = true;
     state.rolloutTurn?.stop?.('controller_complete');
     state.rolloutTurn = null;
+    state.pendingRolloutApproval = null;
+    state.rolloutApprovalQueue = [];
     state.outputBuffer = '';
     state.turnStartedAt = 0;
     state.phase = 'idle';
@@ -1307,6 +1459,10 @@ class RemoteSessionController {
       sentSegmentSignatures: new Set(),
       nativePanelUpdateRequested: false,
       controlActionLocks: new Map(),
+      pendingRolloutApproval: null,
+      rolloutApprovalQueue: [],
+      rolloutApprovalCallIds: new Set(),
+      completedRolloutApprovalCallIds: new Set(),
       lastApprovalSignature: '',
       lastApprovalAttemptSignature: '',
       submittedApprovalSignature: '',
@@ -1754,30 +1910,6 @@ class RemoteSessionController {
         return;
       }
       if (state.nativePageAction) {
-        state.outputBuffer = '';
-        return;
-      }
-      const approval = this.getApprovalPrompt(state, output);
-      if (approval) {
-        this.refreshSessionPhase(state, 'approval_detected');
-        const signature = approvalPromptSignature(approval);
-        if (
-          signature &&
-          signature !== state.lastApprovalSignature &&
-          !state.approvalPanelInFlight &&
-          (
-            signature !== state.lastApprovalAttemptSignature ||
-            Date.now() >= Number(state.approvalPanelRetryAt || 0)
-          )
-        ) {
-          const panel = this.buildPermissionPanelPayload(
-            state.key,
-            null,
-            state,
-            approval
-          );
-          this.presentApprovalPanel(state, panel, signature);
-        }
         state.outputBuffer = '';
         return;
       }
@@ -2532,32 +2664,8 @@ class RemoteSessionController {
     }
   }
 
-  getApprovalPrompt(state, pendingOutput = '') {
-    if (!state?.session) return null;
-
-    const snapshots = [
-      state.session.visualViewportSnapshot,
-      state.session.visualSnapshot
-    ];
-    for (const snapshot of snapshots) {
-      const prompt = extractApprovalPrompt(collectNativeVisualLines(snapshot));
-      if (prompt) return prompt;
-    }
-
-    if (pendingOutput) {
-      const prompt = extractApprovalPrompt(collectNativeRawLines(pendingOutput));
-      if (prompt) return prompt;
-    }
-
-    try {
-      const recent = state.session
-        .readAfter(Math.max(0, Number(state.cursor || 0) - 120))
-        .chunks.map((chunk) => chunk.data)
-        .join('');
-      return extractApprovalPrompt(collectNativeRawLines(recent));
-    } catch {
-      return null;
-    }
+  getApprovalPrompt(state) {
+    return state?.pendingRolloutApproval || null;
   }
 
   async presentApprovalPanel(state, panel, signature, options = {}) {
@@ -2894,6 +3002,9 @@ class RemoteSessionController {
     const choice = extractNativeChoicePromptFromState(state);
     if (!isNativePageActionConfirmed(state, pending, choice)) {
       if (choice) {
+        if (this.autoConfirmFullAccessChoice(state, pending, choice, reason)) {
+          return false;
+        }
         const signature = nativeChoicePromptSignature(choice);
         if (signature && signature !== pending.followupSignature) {
           pending.followupSignature = signature;
@@ -2987,6 +3098,41 @@ class RemoteSessionController {
     state.turnStartedAt = 0;
     state.outputBuffer = '';
     this.refreshSessionPhase(state, `native_page_${pending.action}_confirmed`);
+    return true;
+  }
+
+  autoConfirmFullAccessChoice(state, pending, choice, reason = 'check') {
+    if (!isFullAccessRiskConfirmation(pending, choice)) return false;
+    if (pending.autoConfirmationSubmittedAt) {
+      pending.checks = (pending.checks || 0) + 1;
+      if (Date.now() - pending.autoConfirmationSubmittedAt < 12000) {
+        this.scheduleNativePageActionCheck(
+          state,
+          pending.checks < 6 ? 160 : 800
+        );
+      }
+      return true;
+    }
+    const selected = choice.options
+      .map(normalizeApprovalOption)
+      .find((option) => option.selected);
+    if (!selected || !isContinueFullAccessChoice(selected.text)) return false;
+
+    pending.autoConfirmationSubmittedAt = Date.now();
+    pending.selectedChoice = selected.text;
+    pending.followupSignature = nativeChoicePromptSignature(choice);
+    pending.checks = 0;
+    state.session.write('\r');
+    this.logger.event?.('remote.native_slash.full_access.auto_confirmed', {
+      pluginId: state.pluginId,
+      conversationId: state.conversationId,
+      sessionId: state.session?.id || '',
+      command: pending.command,
+      action: pending.completionAction || pending.action,
+      selected: selected.text,
+      reason
+    });
+    this.scheduleNativePageActionCheck(state, 80);
     return true;
   }
 
@@ -3137,6 +3283,10 @@ class RemoteSessionController {
     state.remoteFileWarnings = [];
     state.sentSegmentSignatures = new Set();
     state.nativePanelUpdateRequested = false;
+    state.pendingRolloutApproval = null;
+    state.rolloutApprovalQueue = [];
+    state.rolloutApprovalCallIds = new Set();
+    state.completedRolloutApprovalCallIds = new Set();
     state.lastApprovalSignature = '';
     state.lastApprovalAttemptSignature = '';
     state.submittedApprovalSignature = '';
@@ -3632,7 +3782,7 @@ function renderPermissionsPickerPage(options) {
   const lines = [
     '**权限模式**',
     `- 当前模式: \`${selected ? selected.text.replace(/\s*\(current\)\s*/i, '') : '未标记'}\``,
-    '- 点击下方模式按钮开始切换；如果 Codex 显示安全确认，将继续在当前卡片中完成。',
+    '- 点击下方模式按钮开始切换；选择 Full Access 时，已识别的安全确认会自动继续。',
     '',
     '**模式**'
   ];
@@ -4421,6 +4571,30 @@ function isCancelNativeChoice(text) {
   return /^(?:(?:cancel|no|go back|exit)\b|取消|返回|退出)/i.test(String(text || '').trim());
 }
 
+function isFullAccessRiskConfirmation(pending, prompt) {
+  if (
+    normalizeNativeCodexCommand(pending?.command) !== '/permissions' ||
+    String(pending?.completionAction || pending?.action || '').toLowerCase() !==
+      'permission_full_access'
+  ) {
+    return false;
+  }
+  if (!/^Enable full access\?$/i.test(String(prompt?.question || '').trim())) {
+    return false;
+  }
+  const options = (prompt?.options || []).map(normalizeApprovalOption);
+  return (
+    options.some((option) => isContinueFullAccessChoice(option.text)) &&
+    options.some((option) => isCancelNativeChoice(option.text))
+  );
+}
+
+function isContinueFullAccessChoice(text) {
+  return /^(?:yes,?\s+continue anyway|continue|继续(?:启用)?)(?:\b|\s|$)/i.test(
+    String(text || '').trim()
+  );
+}
+
 function isApprovalStatusLine(line) {
   const value = normalizeApprovalStatusLine(line);
   return /^(?:Working|Thinking|Running|Ran|Waited|Explored|Read|Edited|Updated|Checked|Applied)\b/i.test(value);
@@ -4851,6 +5025,8 @@ function formatApprovalControlAck(action) {
 
 function approvalPromptSignature(prompt) {
   if (!prompt) return '';
+  const callId = String(prompt.callId || prompt.id || '').trim();
+  if (callId) return `rollout:${callId}`;
   return [
     prompt.question || '',
     prompt.reason || '',

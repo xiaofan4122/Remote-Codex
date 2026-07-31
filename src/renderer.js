@@ -9,6 +9,9 @@ const settingsPanel = document.getElementById('settingsPanel');
 const settingsForm = document.getElementById('settingsForm');
 const closeSettingsButton = document.getElementById('closeSettings');
 const languageSelect = document.getElementById('uiLanguage');
+const automaticUpdatesCheckbox = document.getElementById('automaticUpdatesEnabled');
+const updateStatusElement = document.getElementById('updateStatus');
+const updateActionButton = document.getElementById('updateAction');
 const latexRenderingCheckbox = document.getElementById('feishuLatexRenderingEnabled');
 const latexMaxFormulasInput = document.getElementById('feishuLatexMaxFormulas');
 const connectFeishuButton = document.getElementById('connectFeishu');
@@ -17,18 +20,29 @@ const openFeishuConnectButton = document.getElementById('openFeishuConnect');
 const feishuConnectState = document.getElementById('feishuConnectState');
 const feishuConnectQr = document.getElementById('feishuConnectQr');
 const feishuConnectLink = document.getElementById('feishuConnectLink');
+const feishuConnectBox = document.getElementById('feishuConnectBox');
+const onboardingWelcome = document.getElementById('onboardingWelcome');
+const openSettingsFromOnboardingButton = document.getElementById('openSettingsFromOnboarding');
+const dismissOnboardingWelcomeButton = document.getElementById('dismissOnboardingWelcome');
+const feishuOnboardingGuide = document.getElementById('feishuOnboardingGuide');
+const tryFeishuFromOnboardingButton = document.getElementById('tryFeishuFromOnboarding');
+const dismissOnboardingConnectButton = document.getElementById('dismissOnboardingConnect');
 const settingsStatus = document.getElementById('settingsStatus');
 
 let currentCwd = null;
 let currentConfig = null;
 let currentLanguage = 'zh-CN';
 let currentFeishuStatus = { status: 'idle' };
+let currentUpdateStatus = null;
 let feishuConnectUrl = '';
 let fitFrame = null;
 let snapshotTimer = null;
 let lastSize = { cols: 0, rows: 0 };
 let lastTerminalLayoutSignature = '';
 let scrollbarSyncing = false;
+let onboardingInitialized = false;
+let onboardingStage = 'inactive';
+let onboardingCompleting = false;
 const TERMINAL_MIN_COLS = 2;
 const TERMINAL_MIN_ROWS = 1;
 
@@ -45,6 +59,24 @@ const I18N = {
     languageEnglish: 'English',
     terminalScrollback: '终端滚动历史',
     defaultWorkingDirectory: '默认工作目录',
+    softwareUpdates: '软件更新',
+    automaticUpdatesEnabled: '自动检查并下载更新',
+    automaticUpdatesHelp: '下载完成后将在退出时安装，也可以立即安装并重启。',
+    checkForUpdates: '检查更新',
+    downloadUpdate: '下载更新',
+    installAndRestart: '安装并重启',
+    updateStatusLoading: '正在读取当前版本...',
+    updateStatusIdle: '当前版本 v{version}',
+    updateStatusChecking: '正在检查更新 · 当前版本 v{version}',
+    updateStatusCurrent: '已是最新版本 v{version}',
+    updateStatusAvailable: '发现新版本 v{version}',
+    updateStatusDownloading: '正在下载 v{version} · {percent}%',
+    updateStatusDownloaded: 'v{version} 已下载，退出时将自动安装。',
+    updateStatusDownloadedManual: 'v{version} 已下载，可以立即安装。',
+    updateStatusInstalling: '正在安装 v{version}...',
+    updateStatusUnsupported: '当前安装方式不支持应用内更新。',
+    updateStatusDevelopment: '开发模式不执行应用更新。',
+    updateStatusError: '更新失败：{error}',
     latexRenderingEnabled: '将 LaTeX 公式渲染为图片',
     latexMaxFormulas: '每条回复最多渲染的公式区域',
     connection: '连接',
@@ -65,8 +97,7 @@ const I18N = {
     failedCancelFeishuAuthorization: '取消飞书授权失败。',
     configured: '已配置：{value}',
     connected: '已连接：{value}',
-    feishuConnectedSaved: '飞书已连接并保存。请在飞书开发者后台配置并发布悬浮菜单。',
-    feishuBotMenuHint: '机器人菜单需在飞书开发者后台配置并发布：状态 /status、历史会话 /resume、权限模式 /permission。建议使用悬浮菜单和“发送文字消息”动作。',
+    feishuConnectedSaved: '飞书已连接并保存。',
     feishuStatusStarting: '正在准备飞书授权...',
     feishuStatusWaiting: '打开飞书授权链接继续。',
     feishuStatusPolling: '正在等待飞书授权...',
@@ -74,7 +105,17 @@ const I18N = {
     feishuStatusDomainSwitched: '已切换到 Lark 授权域名。',
     feishuStatusAborting: '正在取消飞书授权...',
     feishuStatusAborted: '已取消飞书授权。',
-    feishuStatusError: '飞书连接失败。'
+    feishuStatusError: '飞书连接失败。',
+    onboardingStepOne: '首次使用 · 第 1 步',
+    onboardingStepTwo: '首次使用 · 第 2 步',
+    onboardingWelcomeTitle: '从连接飞书开始',
+    onboardingWelcomeBody: '打开设置面板，即可让手机上的飞书连接到当前 Codex 会话。',
+    onboardingOpenSettings: '打开设置',
+    onboardingConnectTitle: '尝试连接飞书',
+    onboardingConnectBody: '点击后会打开飞书授权流程。连接成功后，就能从飞书远程控制当前 Codex 会话。',
+    onboardingTryConnect: '尝试连接',
+    onboardingLater: '稍后再说',
+    onboardingSaveFailed: '无法保存首次使用引导状态。'
   },
   en: {
     starting: 'Starting...',
@@ -88,6 +129,24 @@ const I18N = {
     languageEnglish: 'English',
     terminalScrollback: 'Terminal scrollback',
     defaultWorkingDirectory: 'Default working directory',
+    softwareUpdates: 'Software Updates',
+    automaticUpdatesEnabled: 'Automatically check for and download updates',
+    automaticUpdatesHelp: 'Downloaded updates install when the app exits, or you can install and restart now.',
+    checkForUpdates: 'Check for Updates',
+    downloadUpdate: 'Download Update',
+    installAndRestart: 'Install and Restart',
+    updateStatusLoading: 'Reading the current version...',
+    updateStatusIdle: 'Current version v{version}',
+    updateStatusChecking: 'Checking for updates · Current version v{version}',
+    updateStatusCurrent: 'Remote Codex is up to date · v{version}',
+    updateStatusAvailable: 'Version v{version} is available',
+    updateStatusDownloading: 'Downloading v{version} · {percent}%',
+    updateStatusDownloaded: 'v{version} is downloaded and will install on exit.',
+    updateStatusDownloadedManual: 'v{version} is downloaded and ready to install.',
+    updateStatusInstalling: 'Installing v{version}...',
+    updateStatusUnsupported: 'This installation cannot be updated in the app.',
+    updateStatusDevelopment: 'Application updates are disabled in development mode.',
+    updateStatusError: 'Update failed: {error}',
     latexRenderingEnabled: 'Render LaTeX formulas as images',
     latexMaxFormulas: 'Maximum formula regions per reply',
     connection: 'Connection',
@@ -108,8 +167,7 @@ const I18N = {
     failedCancelFeishuAuthorization: 'Failed to cancel Feishu authorization.',
     configured: 'Configured: {value}',
     connected: 'Connected: {value}',
-    feishuConnectedSaved: 'Feishu connected and saved. Configure and publish the floating bot menu in the Feishu Developer Console.',
-    feishuBotMenuHint: 'Configure and publish the bot menu in the Feishu Developer Console: Status /status, Sessions /resume, Permissions /permission. Use the floating menu and Send text message actions.',
+    feishuConnectedSaved: 'Feishu connected and saved.',
     feishuStatusStarting: 'Preparing Feishu authorization...',
     feishuStatusWaiting: 'Open the Feishu authorization link to continue.',
     feishuStatusPolling: 'Waiting for Feishu authorization...',
@@ -117,7 +175,17 @@ const I18N = {
     feishuStatusDomainSwitched: 'Switched to Lark authorization domain.',
     feishuStatusAborting: 'Cancelling Feishu authorization...',
     feishuStatusAborted: 'Feishu authorization cancelled.',
-    feishuStatusError: 'Feishu connection failed.'
+    feishuStatusError: 'Feishu connection failed.',
+    onboardingStepOne: 'First use · Step 1',
+    onboardingStepTwo: 'First use · Step 2',
+    onboardingWelcomeTitle: 'Start by connecting Feishu',
+    onboardingWelcomeBody: 'Open Settings to connect Feishu on your phone to the current Codex session.',
+    onboardingOpenSettings: 'Open Settings',
+    onboardingConnectTitle: 'Try connecting Feishu',
+    onboardingConnectBody: 'This starts Feishu authorization. Once connected, Feishu can remotely control the current Codex session.',
+    onboardingTryConnect: 'Try Connection',
+    onboardingLater: 'Maybe Later',
+    onboardingSaveFailed: 'Could not save the first-use guide state.'
   }
 };
 
@@ -349,6 +417,7 @@ window.codexShell.onCwd((cwd) => {
 window.codexShell.onConfigUpdated((config) => {
   currentConfig = config;
   setLanguage(config.ui?.language);
+  initializeOnboarding(config);
   if (settingsPanel.getAttribute('aria-hidden') === 'false') {
     populateSettings(config);
   }
@@ -357,7 +426,14 @@ window.codexShell.onFeishuConnectStatus((status) => {
   renderFeishuConnectStatus(status);
   if (status.status === 'complete') {
     loadSettings();
+    if (onboardingStage !== 'inactive') {
+      completeOnboarding('feishu_connected');
+    }
   }
+});
+window.codexShell.onUpdateStatus((status) => {
+  currentUpdateStatus = status;
+  renderUpdateStatus(status);
 });
 
 term.onData((data) => window.codexShell.write(data));
@@ -607,18 +683,29 @@ restartButton.addEventListener('click', async () => {
 });
 
 settingsButton.addEventListener('click', async () => {
-  settingsPanel.setAttribute('aria-hidden', 'false');
-  await loadSettings();
+  await openSettingsPanel({ advanceOnboarding: onboardingStage === 'settings' });
 });
 
 closeSettingsButton.addEventListener('click', () => {
-  settingsPanel.setAttribute('aria-hidden', 'true');
+  closeSettingsPanel();
 });
 
 settingsPanel.addEventListener('click', (event) => {
   if (event.target === settingsPanel) {
-    settingsPanel.setAttribute('aria-hidden', 'true');
+    closeSettingsPanel();
   }
+});
+
+openSettingsFromOnboardingButton.addEventListener('click', async () => {
+  await openSettingsPanel({ advanceOnboarding: true });
+});
+
+dismissOnboardingWelcomeButton.addEventListener('click', () => {
+  completeOnboarding('welcome_dismissed');
+});
+
+dismissOnboardingConnectButton.addEventListener('click', () => {
+  completeOnboarding('connect_dismissed');
 });
 
 settingsForm.addEventListener('submit', async (event) => {
@@ -632,11 +719,40 @@ languageSelect.addEventListener('change', () => {
     renderFeishuConfiguredState(currentConfig);
   }
   renderFeishuConnectStatus(currentFeishuStatus);
+  renderUpdateStatus(currentUpdateStatus);
 });
 
 latexRenderingCheckbox.addEventListener('change', syncLatexSettingsState);
 
-connectFeishuButton.addEventListener('click', async () => {
+updateActionButton.addEventListener('click', async () => {
+  const status = currentUpdateStatus?.status;
+  try {
+    if (status === 'available') {
+      currentUpdateStatus = await window.codexShell.downloadUpdate();
+    } else if (status === 'downloaded') {
+      currentUpdateStatus = await window.codexShell.installUpdate();
+    } else {
+      currentUpdateStatus = await window.codexShell.checkForUpdates();
+    }
+    renderUpdateStatus(currentUpdateStatus);
+  } catch (error) {
+    renderUpdateStatus({
+      ...currentUpdateStatus,
+      status: 'error',
+      error: error.message || 'Unknown error'
+    });
+  }
+});
+
+connectFeishuButton.addEventListener('click', () => {
+  startFeishuConnection({ fromOnboarding: onboardingStage === 'feishu' });
+});
+
+tryFeishuFromOnboardingButton.addEventListener('click', () => {
+  startFeishuConnection({ fromOnboarding: true });
+});
+
+async function startFeishuConnection({ fromOnboarding = false } = {}) {
   if (!currentConfig) {
     currentConfig = await window.codexShell.getConfig();
   }
@@ -650,13 +766,16 @@ connectFeishuButton.addEventListener('click', async () => {
   try {
     const status = await window.codexShell.startFeishuConnect(nextConfig);
     renderFeishuConnectStatus(status);
+    if (fromOnboarding && status?.status !== 'error') {
+      await completeOnboarding('feishu_connect_started');
+    }
   } catch (error) {
     renderFeishuConnectStatus({
       status: 'error',
       message: error.message || t('failedStartFeishuAuthorization')
     });
   }
-});
+}
 
 cancelFeishuConnectButton.addEventListener('click', async () => {
   try {
@@ -687,14 +806,75 @@ setTimeout(requestFit, 100);
 window.codexShell.getConfig().then((config) => {
   currentConfig = config;
   setLanguage(config.ui?.language);
+  initializeOnboarding(config);
 }).catch(() => {
   setLanguage(currentLanguage);
 });
+
+async function openSettingsPanel({ advanceOnboarding = false } = {}) {
+  settingsPanel.setAttribute('aria-hidden', 'false');
+  await loadSettings();
+  if (advanceOnboarding && onboardingStage !== 'inactive') {
+    setOnboardingStage('feishu');
+  }
+}
+
+function closeSettingsPanel() {
+  settingsPanel.setAttribute('aria-hidden', 'true');
+  if (onboardingStage === 'feishu') {
+    setOnboardingStage('settings');
+  }
+}
+
+function initializeOnboarding(config) {
+  if (config?.ui?.onboardingCompleted === true || config?.plugins?.feishu?.appId) {
+    onboardingInitialized = true;
+    setOnboardingStage('inactive');
+    return;
+  }
+  if (onboardingInitialized) return;
+  onboardingInitialized = true;
+  if (config?.ui?.firstRun === true) {
+    setOnboardingStage('settings');
+  }
+}
+
+function setOnboardingStage(stage) {
+  onboardingStage = ['settings', 'feishu'].includes(stage) ? stage : 'inactive';
+  onboardingWelcome.setAttribute(
+    'aria-hidden',
+    onboardingStage === 'settings' ? 'false' : 'true'
+  );
+  feishuOnboardingGuide.hidden = onboardingStage !== 'feishu';
+  settingsButton.classList.toggle('onboarding-target', onboardingStage === 'settings');
+  feishuConnectBox.classList.toggle('onboarding-target', onboardingStage === 'feishu');
+
+  if (onboardingStage === 'feishu') {
+    requestAnimationFrame(() => {
+      feishuOnboardingGuide.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
+  }
+}
+
+async function completeOnboarding(reason) {
+  if (onboardingCompleting) return;
+  onboardingCompleting = true;
+  try {
+    currentConfig = await window.codexShell.completeOnboarding(reason);
+    setOnboardingStage('inactive');
+  } catch (error) {
+    setSettingsStatus(error.message || t('onboardingSaveFailed'));
+  } finally {
+    onboardingCompleting = false;
+  }
+}
 
 async function loadSettings() {
   setSettingsStatus(t('loadingSettings'));
   currentConfig = await window.codexShell.getConfig();
   populateSettings(currentConfig);
+  currentUpdateStatus = await window.codexShell.getUpdateStatus();
+  renderUpdateStatus(currentUpdateStatus);
   renderFeishuConnectStatus(await window.codexShell.getFeishuConnectStatus());
   setSettingsStatus(t('settingsLoaded'));
 }
@@ -726,6 +906,7 @@ function populateSettings(config) {
     config.codex?.configuredDefaultCwd || config.codex?.defaultCwd || ''
   );
   const feishu = config.plugins?.feishu || {};
+  automaticUpdatesCheckbox.checked = config.updates?.automaticEnabled !== false;
   latexRenderingCheckbox.checked = feishu.latexRenderingEnabled !== false;
   latexMaxFormulasInput.value = String(feishu.latexMaxFormulas || 64);
   syncLatexSettingsState();
@@ -748,10 +929,12 @@ function collectSettings(baseConfig) {
   next.codex = next.codex || {};
   next.ui = next.ui || {};
   next.remoteControl = next.remoteControl || {};
+  next.updates = next.updates || {};
   next.plugins = next.plugins || {};
   next.plugins.feishu = next.plugins.feishu || {};
 
   next.ui.language = normalizeLanguage(getValue('uiLanguage'));
+  next.updates.automaticEnabled = automaticUpdatesCheckbox.checked;
   next.codex.defaultCwd = getValue('codexDefaultCwd');
   next.codex.configuredDefaultCwd = next.codex.defaultCwd;
   const feishu = next.plugins.feishu;
@@ -791,6 +974,53 @@ function setValue(id, value) {
 
 function setSettingsStatus(message) {
   settingsStatus.textContent = message;
+}
+
+function renderUpdateStatus(status) {
+  if (!updateStatusElement || !updateActionButton) return;
+  if (!status) {
+    updateStatusElement.textContent = t('updateStatusLoading');
+    updateActionButton.textContent = t('checkForUpdates');
+    updateActionButton.disabled = true;
+    return;
+  }
+
+  const version = status.latestVersion || status.currentVersion || '';
+  const percent = Number.isFinite(Number(status.percent))
+    ? Math.max(0, Math.min(100, Math.round(Number(status.percent))))
+    : 0;
+  const messageKey = {
+    idle: 'updateStatusIdle',
+    checking: 'updateStatusChecking',
+    up_to_date: 'updateStatusCurrent',
+    available: 'updateStatusAvailable',
+    downloading: 'updateStatusDownloading',
+    downloaded: status.automaticEnabled
+      ? 'updateStatusDownloaded'
+      : 'updateStatusDownloadedManual',
+    installing: 'updateStatusInstalling',
+    unsupported: status.installMode === 'development'
+      ? 'updateStatusDevelopment'
+      : 'updateStatusUnsupported',
+    error: 'updateStatusError'
+  }[status.status] || 'updateStatusIdle';
+
+  updateStatusElement.textContent = t(messageKey, {
+    version,
+    percent,
+    error: status.error || 'Unknown error'
+  });
+  updateActionButton.textContent = status.status === 'available'
+    ? t('downloadUpdate')
+    : status.status === 'downloaded'
+      ? t('installAndRestart')
+      : t('checkForUpdates');
+  updateActionButton.disabled = [
+    'checking',
+    'downloading',
+    'installing',
+    'unsupported'
+  ].includes(status.status);
 }
 
 function renderFeishuConnectStatus(status = { status: 'idle' }) {
@@ -878,6 +1108,7 @@ function setLanguage(language) {
     cwdElement.textContent = t('starting');
   }
   terminalScrollbar.setAttribute('aria-label', t('terminalScrollback'));
+  renderUpdateStatus(currentUpdateStatus);
 }
 
 function normalizeLanguage(language) {

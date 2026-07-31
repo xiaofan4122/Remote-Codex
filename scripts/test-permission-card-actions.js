@@ -177,6 +177,7 @@ async function testRemoteControlInputBuffer() {
   const key = 'feishu:chat';
   const writes = [];
   const replies = [];
+  const approval = rolloutApproval('call-input-buffer');
   controller.sessions.set(key, {
     key,
     pluginId: 'feishu',
@@ -193,7 +194,8 @@ async function testRemoteControlInputBuffer() {
       }
     },
     cursor: 0,
-    controlActionLocks: new Map()
+    controlActionLocks: new Map(),
+    pendingRolloutApproval: approval
   });
 
   const message = {
@@ -235,6 +237,7 @@ async function testStaleApprovalContextIsRejected() {
   const key = 'feishu:stale-approval';
   const writes = [];
   const panels = [];
+  const approval = rolloutApproval('call-stale-approval');
   const state = {
     key,
     pluginId: 'feishu',
@@ -251,10 +254,10 @@ async function testStaleApprovalContextIsRejected() {
       }
     },
     cursor: 0,
-    controlActionLocks: new Map()
+    controlActionLocks: new Map(),
+    pendingRolloutApproval: approval
   };
   controller.sessions.set(key, state);
-  const approval = extractApprovalPrompt(approvalLines(1).split('\n'));
   const currentContext = controller.buildPermissionPanelPayload(
     key,
     null,
@@ -609,6 +612,23 @@ function createController() {
       plugins: {}
     }
   });
+}
+
+function rolloutApproval(callId) {
+  return {
+    id: callId,
+    callId,
+    source: 'rollout_jsonl',
+    turnId: 'turn-permission-test',
+    question: '是否允许执行以下操作？',
+    reason: 'Reason: Need to verify.',
+    command: 'npm run test:feishu-remote-turn',
+    options: [
+      { index: 1, text: 'Yes', selected: true },
+      { index: 2, text: 'Yes, always approve', selected: false },
+      { index: 3, text: 'No', selected: false }
+    ]
+  };
 }
 
 main().catch((error) => {

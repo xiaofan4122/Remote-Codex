@@ -4,16 +4,209 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { CodexRolloutReader } = require('../src/codexRolloutReader');
+const {
+  CodexRolloutReader,
+  extractEscalatedExecRequests,
+  parseAllowedExecPrefixes,
+  parseRolloutAuthorizationRequest
+} = require('../src/codexRolloutReader');
 
 async function main() {
   await testBindsNextUnknownPrompt();
   await testIncrementalRolloutEventsAreSemanticAndOrdered();
+  await testAuthorizationEventsComeFromStructuredRolloutRecords();
   await testResumeAppendsWithoutReplayingPreviousTurns();
   await testRecentIdenticalPromptDoesNotBindPreviousTurn();
   await testQueuedIdenticalPromptsBindInOrder();
   await testNextTaskBoundaryCannotLeakIntoBoundTurn();
   console.log('Codex rollout reader tests passed.');
+}
+
+async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
+  const fixture = createFixture();
+  const rulesDir = path.join(fixture.codexHome, 'rules');
+  fs.mkdirSync(rulesDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(rulesDir, 'default.rules'),
+    'prefix_rule(pattern=["git", "tag"], decision="allow")\n'
+  );
+  const prompt = '连续执行两个需要授权的操作';
+  const startedAt = Date.now();
+  const turnId = 'turn-authorization';
+  const events = [];
+  const reader = createReader(fixture.codexHome);
+  reader.beginTurn({
+    prompt,
+    cwd: fixture.cwd,
+    startedAt,
+    onEvent: (event) => events.push(event),
+    onError: (error) => {
+      throw error;
+    }
+  });
+  appendJson(fixture.historyPath, {
+    session_id: fixture.sessionId,
+    ts: startedAt / 1000,
+    text: prompt
+  });
+  appendRollout(fixture.rolloutPath, [
+    event('event_msg', { type: 'task_started', turn_id: turnId }),
+    event('turn_context', { turn_id: turnId, cwd: fixture.cwd }),
+    event('event_msg', { type: 'user_message', message: prompt })
+  ]);
+  await waitUntil(() => events.some((entry) => entry.type === 'bound'));
+
+  const firstRequest = event('response_item', {
+    type: 'custom_tool_call',
+    name: 'exec',
+    call_id: 'call-authorization-first',
+    input: [
+      'const r = await tools.exec_command({',
+      '  cmd: "sudo -n /usr/bin/true",',
+      `  workdir: ${JSON.stringify(fixture.cwd)},`,
+      '  sandbox_permissions: "require_escalated",',
+      '  justification: "验证第一项授权"',
+      '});',
+      'text(r.output);'
+    ].join('\n'),
+    internal_chat_message_metadata_passthrough: { turn_id: turnId }
+  });
+  const secondRequest = event('response_item', {
+    type: 'custom_tool_call',
+    name: 'exec',
+    call_id: 'call-authorization-second',
+    input: [
+      'const r = await tools.exec_command({',
+      '  cmd: "xdotool windowactivate 42",',
+      `  workdir: ${JSON.stringify(fixture.cwd)},`,
+      '  sandbox_permissions: "require_escalated",',
+      '  justification: "验证第二项授权"',
+      '});',
+      'text(r.output);'
+    ].join('\n'),
+    internal_chat_message_metadata_passthrough: { turn_id: turnId }
+  });
+  const automaticallyAllowedRequest = event('response_item', {
+    type: 'custom_tool_call',
+    name: 'exec',
+    call_id: 'call-automatically-allowed',
+    input: [
+      'const r = await tools.exec_command({',
+      '  cmd: "git tag --list",',
+      `  workdir: ${JSON.stringify(fixture.cwd)},`,
+      '  sandbox_permissions: "require_escalated",',
+      '  justification: "该操作已被本地规则放行",',
+      '  prefix_rule: ["git", "tag"]',
+      '});',
+      'text(r.output);'
+    ].join('\n'),
+    internal_chat_message_metadata_passthrough: { turn_id: turnId }
+  });
+  appendRollout(fixture.rolloutPath, [
+    firstRequest,
+    firstRequest,
+    event('response_item', {
+      type: 'custom_tool_call_output',
+      call_id: 'call-authorization-first',
+      output: [{ type: 'input_text', text: 'ok' }]
+    }),
+    event('response_item', {
+      type: 'custom_tool_call_output',
+      call_id: 'call-authorization-first',
+      output: [{ type: 'input_text', text: 'duplicate' }]
+    }),
+    event('response_item', {
+      type: 'custom_tool_call',
+      name: 'exec',
+      call_id: 'call-not-an-authorization',
+      input: 'text("sandbox_permissions: require_escalated; cmd: terminal garbage");'
+    }),
+    automaticallyAllowedRequest,
+    event('response_item', {
+      type: 'custom_tool_call_output',
+      call_id: 'call-automatically-allowed',
+      output: [{ type: 'input_text', text: 'auto approved' }]
+    }),
+    secondRequest,
+    event('response_item', {
+      type: 'custom_tool_call_output',
+      call_id: 'call-authorization-second',
+      output: [{ type: 'input_text', text: 'ok' }]
+    }),
+    event('event_msg', {
+      type: 'agent_message',
+      phase: 'final_answer',
+      message: '两个操作均已处理。'
+    }),
+    event('event_msg', {
+      type: 'task_complete',
+      turn_id: turnId,
+      last_agent_message: '两个操作均已处理。'
+    })
+  ]);
+
+  await waitUntil(() => events.some((entry) => entry.type === 'turn_complete'));
+  assert.deepEqual(
+    events
+      .filter((entry) => entry.type === 'authorization_requested')
+      .map((entry) => entry.callId),
+    ['call-authorization-first', 'call-authorization-second']
+  );
+  assert.deepEqual(
+    events
+      .filter((entry) => entry.type === 'authorization_completed')
+      .map((entry) => entry.callId),
+    ['call-authorization-first', 'call-authorization-second']
+  );
+  const approvals = events
+    .filter((entry) => entry.type === 'authorization_requested')
+    .map((entry) => entry.approval);
+  assert.equal(approvals[0].source, 'rollout_jsonl');
+  assert.equal(approvals[0].command, 'sudo -n /usr/bin/true');
+  assert.equal(approvals[0].reason, 'Reason: 验证第一项授权');
+  assert.equal(approvals[1].command, 'xdotool windowactivate 42');
+  assert.doesNotMatch(JSON.stringify(approvals), /terminal garbage|�|\u0000/);
+
+  assert.deepEqual(
+    extractEscalatedExecRequests(firstRequest.payload.input),
+    [{ command: 'sudo -n /usr/bin/true', justification: '验证第一项授权' }]
+  );
+  assert.deepEqual(
+    extractEscalatedExecRequests(automaticallyAllowedRequest.payload.input),
+    [{
+      command: 'git tag --list',
+      justification: '该操作已被本地规则放行',
+      prefixRule: ['git', 'tag']
+    }]
+  );
+  assert.deepEqual(
+    parseAllowedExecPrefixes([
+      'prefix_rule(pattern=["git", "tag"], decision="allow")',
+      'prefix_rule(pattern=["sudo", "blocked"], decision="deny")'
+    ].join('\n')),
+    [['git', 'tag']]
+  );
+  assert.deepEqual(
+    extractEscalatedExecRequests(String.raw`tools.exec_command({
+      cmd: "sudo \u4f60\u597d",
+      sandbox_permissions: "require_escalated",
+      justification: "\u5141\u8bb8"
+    });`),
+    [{ command: 'sudo 你好', justification: '允许' }]
+  );
+  assert.deepEqual(
+    extractEscalatedExecRequests(
+      'tools.exec_command({ justification: "🧪 验证", cmd: "sudo true", sandbox_permissions: "require_escalated" });'
+    ),
+    [{ command: 'sudo true', justification: '🧪 验证' }]
+  );
+  assert.equal(parseRolloutAuthorizationRequest({
+    type: 'custom_tool_call',
+    name: 'exec',
+    call_id: 'call-safe',
+    input: 'text("sandbox_permissions: require_escalated");'
+  }), null);
+  reader.stopAll();
 }
 
 async function testBindsNextUnknownPrompt() {

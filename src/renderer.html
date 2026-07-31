@@ -27,6 +27,21 @@
       </div>
     </header>
 
+    <aside
+      id="onboardingWelcome"
+      class="onboarding-welcome"
+      aria-hidden="true"
+      aria-labelledby="onboardingWelcomeTitle"
+    >
+      <span class="onboarding-eyebrow" data-i18n="onboardingStepOne">首次使用 · 第 1 步</span>
+      <h2 id="onboardingWelcomeTitle" data-i18n="onboardingWelcomeTitle">从连接飞书开始</h2>
+      <p data-i18n="onboardingWelcomeBody">打开设置面板，即可让手机上的飞书连接到当前 Codex 会话。</p>
+      <div class="onboarding-actions">
+        <button id="dismissOnboardingWelcome" type="button" data-i18n="onboardingLater">稍后再说</button>
+        <button id="openSettingsFromOnboarding" class="primary-button" type="button" data-i18n="onboardingOpenSettings">打开设置</button>
+      </div>
+    </aside>
+
     <main id="terminalShell">
       <section id="terminal"></section>
       <aside id="terminalScrollbar" aria-label="终端滚动历史">
@@ -64,20 +79,20 @@
           </section>
 
           <section class="settings-section">
-            <h3>Feishu</h3>
-            <div class="connect-box">
-              <div class="connect-copy">
-                <strong data-i18n="connection">连接</strong>
-                <span id="feishuConnectState">未连接。</span>
-              </div>
-              <div class="connect-actions">
-                <button id="connectFeishu" type="button">连接飞书</button>
-                <button id="openFeishuConnect" type="button" disabled data-i18n="openLink">打开链接</button>
-                <button id="cancelFeishuConnect" type="button" disabled data-i18n="cancel">取消</button>
-              </div>
-              <img id="feishuConnectQr" alt="" hidden />
-              <p id="feishuConnectLink"></p>
+            <h3 data-i18n="softwareUpdates">软件更新</h3>
+            <div class="check-row">
+              <input id="automaticUpdatesEnabled" name="automaticUpdatesEnabled" type="checkbox" />
+              <label for="automaticUpdatesEnabled" data-i18n="automaticUpdatesEnabled">自动检查并下载更新</label>
             </div>
+            <div class="settings-action-row update-action-row">
+              <span id="updateStatus" role="status" aria-live="polite">正在读取当前版本...</span>
+              <button id="updateAction" type="button" data-i18n="checkForUpdates">检查更新</button>
+            </div>
+            <p class="settings-help" data-i18n="automaticUpdatesHelp">下载完成后将在退出时安装，也可以立即安装并重启。</p>
+          </section>
+
+          <section class="settings-section">
+            <h3>Feishu</h3>
             <div class="check-row">
               <input id="feishuLatexRenderingEnabled" name="feishuLatexRenderingEnabled" type="checkbox" />
               <label for="feishuLatexRenderingEnabled" data-i18n="latexRenderingEnabled">将 LaTeX 公式渲染为图片</label>
@@ -94,7 +109,28 @@
                 inputmode="numeric"
               />
             </label>
-            <p class="settings-help" data-i18n="feishuBotMenuHint"></p>
+            <div id="feishuOnboardingGuide" class="onboarding-inline" hidden>
+              <span class="onboarding-eyebrow" data-i18n="onboardingStepTwo">首次使用 · 第 2 步</span>
+              <strong data-i18n="onboardingConnectTitle">尝试连接飞书</strong>
+              <p data-i18n="onboardingConnectBody">点击后会打开飞书授权流程。连接成功后，就能从飞书远程控制当前 Codex 会话。</p>
+              <div class="onboarding-actions">
+                <button id="dismissOnboardingConnect" type="button" data-i18n="onboardingLater">稍后再说</button>
+                <button id="tryFeishuFromOnboarding" class="primary-button" type="button" data-i18n="onboardingTryConnect">尝试连接</button>
+              </div>
+            </div>
+            <div id="feishuConnectBox" class="connect-box">
+              <div class="connect-copy">
+                <strong data-i18n="connection">连接</strong>
+                <span id="feishuConnectState">未连接。</span>
+              </div>
+              <div class="connect-actions">
+                <button id="connectFeishu" type="button">连接飞书</button>
+                <button id="openFeishuConnect" type="button" disabled data-i18n="openLink">打开链接</button>
+                <button id="cancelFeishuConnect" type="button" disabled data-i18n="cancel">取消</button>
+              </div>
+              <img id="feishuConnectQr" alt="" hidden />
+              <p id="feishuConnectLink"></p>
+            </div>
           </section>
         </div>
 

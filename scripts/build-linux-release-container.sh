@@ -5,9 +5,11 @@ REMOTE_CODEX_BUILD_ARCH="${1:-}"
 case "${REMOTE_CODEX_BUILD_ARCH}" in
   x64)
     REMOTE_CODEX_DEB_ARCH=amd64
+    REMOTE_CODEX_UPDATE_METADATA=latest-linux.yml
     ;;
   arm64)
     REMOTE_CODEX_DEB_ARCH=arm64
+    REMOTE_CODEX_UPDATE_METADATA=latest-linux-arm64.yml
     ;;
   *)
     printf 'Usage: %s <x64|arm64>\n' "$0" >&2
@@ -56,7 +58,8 @@ rm -f -- \
   "${REMOTE_CODEX_PROJECT_ROOT}/dist/remote-codex-linux-${REMOTE_CODEX_BUILD_ARCH}.tar.gz" \
   "${REMOTE_CODEX_PROJECT_ROOT}/dist/remote-codex-linux-${REMOTE_CODEX_BUILD_ARCH}.tar.gz.sha256" \
   "${REMOTE_CODEX_PROJECT_ROOT}/dist/remote-codex-linux-${REMOTE_CODEX_DEB_ARCH}.deb" \
-  "${REMOTE_CODEX_PROJECT_ROOT}/dist/remote-codex-linux-${REMOTE_CODEX_DEB_ARCH}.deb.sha256"
+  "${REMOTE_CODEX_PROJECT_ROOT}/dist/remote-codex-linux-${REMOTE_CODEX_DEB_ARCH}.deb.sha256" \
+  "${REMOTE_CODEX_PROJECT_ROOT}/dist/${REMOTE_CODEX_UPDATE_METADATA}"
 
 REMOTE_CODEX_DOCKER_NETWORK_ARGS=()
 if [ -n "${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}" ]; then
@@ -74,6 +77,7 @@ run_release_build_container() {
     "${REMOTE_CODEX_DOCKER_NETWORK_ARGS[@]}" \
     --env "REMOTE_CODEX_BUILD_ARCH=${REMOTE_CODEX_BUILD_ARCH}" \
     --env "REMOTE_CODEX_DEB_ARCH=${REMOTE_CODEX_DEB_ARCH}" \
+    --env "REMOTE_CODEX_UPDATE_METADATA=${REMOTE_CODEX_UPDATE_METADATA}" \
     --env npm_config_cache=/tmp/remote-codex-npm-cache \
     --env ELECTRON_CACHE=/tmp/remote-codex-electron-cache \
     --env npm_config_devdir=/tmp/remote-codex-electron-gyp \
@@ -104,6 +108,7 @@ run_release_build_container() {
       "dist/remote-codex-linux-${REMOTE_CODEX_BUILD_ARCH}.tar.gz.sha256" \
       "dist/remote-codex-linux-${REMOTE_CODEX_DEB_ARCH}.deb" \
       "dist/remote-codex-linux-${REMOTE_CODEX_DEB_ARCH}.deb.sha256" \
+      "dist/${REMOTE_CODEX_UPDATE_METADATA}" \
       /output/
   '
 }

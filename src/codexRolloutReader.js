@@ -34,6 +34,10 @@ class CodexRolloutReader {
     );
     this.rolloutPaths = new Map();
     this.turns = new Set();
+    this.allowedExecPrefixCache = {
+      mtimeMs: -1,
+      prefixes: []
+    };
   }
 
   beginTurn(options = {}) {
@@ -75,6 +79,27 @@ class CodexRolloutReader {
     if (found) this.rolloutPaths.set(id, found);
     return found;
   }
+
+  getAllowedExecPrefixes() {
+    const rulesPath = path.join(this.codexHome, 'rules', 'default.rules');
+    try {
+      const stat = this.fs.statSync(rulesPath);
+      if (this.allowedExecPrefixCache.mtimeMs === stat.mtimeMs) {
+        return this.allowedExecPrefixCache.prefixes;
+      }
+      const prefixes = parseAllowedExecPrefixes(
+        this.fs.readFileSync(rulesPath, 'utf8')
+      );
+      this.allowedExecPrefixCache = {
+        mtimeMs: stat.mtimeMs,
+        prefixes
+      };
+      return prefixes;
+    } catch {
+      this.allowedExecPrefixCache = { mtimeMs: -1, prefixes: [] };
+      return [];
+    }
+  }
 }
 
 class CodexRolloutTurn {
@@ -111,6 +136,8 @@ class CodexRolloutTurn {
     this.historyTimestampMs = 0;
     this.turnId = '';
     this.finalText = '';
+    this.authorizationRequests = new Map();
+    this.authorizationCompletions = new Set();
     this.bound = false;
     this.completed = false;
     this.stopped = false;
@@ -244,7 +271,12 @@ class CodexRolloutTurn {
   }
 
   consumeRolloutRecord(record) {
-    if (this.stopped || !record || record.type !== 'event_msg') return;
+    if (this.stopped || !record) return;
+    if (record.type === 'response_item') {
+      this.consumeResponseItem(record);
+      return;
+    }
+    if (record.type !== 'event_msg') return;
     const payload = record.payload || {};
 
     if (payload.type === 'task_started') {
@@ -303,6 +335,55 @@ class CodexRolloutTurn {
       timestamp: record.timestamp || ''
     });
     this.stop('turn_complete');
+  }
+
+  consumeResponseItem(record) {
+    const payload = record.payload || {};
+    if (payload.type === 'custom_tool_call') {
+      let approval = parseRolloutAuthorizationRequest(payload);
+      if (!approval) return;
+      approval = filterAutomaticallyAllowedAuthorization(
+        approval,
+        this.reader.getAllowedExecPrefixes()
+      );
+      if (!approval) {
+        this.logger.event?.('codex.rollout.authorization.ignored', {
+          callId: String(payload.call_id || ''),
+          reason: 'allowed_exec_prefix'
+        });
+        return;
+      }
+      if (this.authorizationRequests.has(approval.callId)) return;
+      this.authorizationRequests.set(approval.callId, approval);
+      this.emitEvent({
+        type: 'authorization_requested',
+        sessionId: this.sessionId,
+        turnId: approval.turnId || this.turnId,
+        callId: approval.callId,
+        approval,
+        timestamp: record.timestamp || ''
+      });
+      return;
+    }
+
+    if (payload.type !== 'custom_tool_call_output') return;
+    const callId = String(payload.call_id || '').trim();
+    if (
+      !callId ||
+      !this.authorizationRequests.has(callId) ||
+      this.authorizationCompletions.has(callId)
+    ) {
+      return;
+    }
+    this.authorizationCompletions.add(callId);
+    const approval = this.authorizationRequests.get(callId);
+    this.emitEvent({
+      type: 'authorization_completed',
+      sessionId: this.sessionId,
+      turnId: approval?.turnId || this.turnId,
+      callId,
+      timestamp: record.timestamp || ''
+    });
   }
 
   emitEvent(event) {
@@ -524,6 +605,379 @@ function normalizeRolloutMessage(value) {
     .replace(/^\n+|\n+$/g, '');
 }
 
+function parseRolloutAuthorizationRequest(payload = {}) {
+  if (
+    payload.type !== 'custom_tool_call' ||
+    String(payload.name || '') !== 'exec'
+  ) {
+    return null;
+  }
+  const callId = String(payload.call_id || '').trim();
+  if (!callId) return null;
+  const requests = extractEscalatedExecRequests(payload.input);
+  if (requests.length === 0) return null;
+
+  return buildRolloutAuthorization({
+    callId,
+    turnId: String(
+      payload.internal_chat_message_metadata_passthrough?.turn_id || ''
+    ),
+    requests
+  });
+}
+
+function buildRolloutAuthorization({ callId, turnId, requests }) {
+  const normalizedRequests = Array.isArray(requests) ? requests : [];
+  if (!callId || normalizedRequests.length === 0) return null;
+
+  const commands = uniqueNonEmpty(
+    normalizedRequests.map((request) => request.command)
+  );
+  const justifications = uniqueNonEmpty(
+    normalizedRequests.map((request) => request.justification)
+  );
+  const command = commands.join('\n');
+  const justification = justifications.join('；');
+  return {
+    id: callId,
+    callId,
+    source: 'rollout_jsonl',
+    turnId: String(turnId || ''),
+    requests: normalizedRequests,
+    status: '',
+    question: normalizedRequests.length > 1
+      ? `是否允许执行这组操作（${normalizedRequests.length} 项）？`
+      : '是否允许执行以下操作？',
+    reason: justification ? `Reason: ${justification}` : '',
+    command: command || '命令由 Codex 在运行时生成。',
+    commandCount: normalizedRequests.length,
+    options: [
+      { selected: true, index: 1, text: 'Yes, proceed (y)' },
+      { selected: false, index: 2, text: "Yes, and don't ask again (p)" },
+      { selected: false, index: 3, text: 'No, and tell Codex what to do differently (esc)' }
+    ]
+  };
+}
+
+function extractEscalatedExecRequests(input) {
+  const source = String(input || '');
+  if (!source) return [];
+  const requests = [];
+  for (const objectSource of findCallObjectLiterals(source, 'tools.exec_command')) {
+    const permission = extractStaticStringProperty(
+      objectSource,
+      'sandbox_permissions'
+    );
+    if (permission !== 'require_escalated') continue;
+    const request = {
+      command: extractStaticStringProperty(objectSource, 'cmd'),
+      justification: extractStaticStringProperty(objectSource, 'justification')
+    };
+    const prefixRule = extractStaticStringArrayProperty(
+      objectSource,
+      'prefix_rule'
+    );
+    if (prefixRule.length > 0) request.prefixRule = prefixRule;
+    requests.push(request);
+  }
+  if (requests.length > 0) return dedupeEscalatedRequests(requests);
+
+  const permissions = extractStaticStringProperties(source, 'sandbox_permissions');
+  if (!permissions.includes('require_escalated')) return [];
+  return [{
+    command: extractStaticStringProperties(source, 'cmd')[0] || '',
+    justification: extractStaticStringProperties(source, 'justification')[0] || ''
+  }];
+}
+
+function extractStaticStringArrayProperty(source, name) {
+  const value = String(source || '');
+  const masked = maskJavaScriptNonCode(value);
+  const pattern = new RegExp(`\\b${escapeRegExp(name)}\\s*:`, 'g');
+  const depths = objectDepths(masked);
+  let match;
+  while ((match = pattern.exec(masked))) {
+    if (depths[match.index] !== 1) continue;
+    let cursor = match.index + match[0].length;
+    while (/\s/.test(value[cursor] || '')) cursor += 1;
+    const parsed = readStaticStringArray(value, cursor);
+    if (parsed) return parsed.values;
+  }
+  return [];
+}
+
+function readStaticStringArray(source, start) {
+  if (source[start] !== '[') return null;
+  const values = [];
+  let cursor = start + 1;
+  while (cursor < source.length) {
+    while (/\s/.test(source[cursor] || '')) cursor += 1;
+    if (source[cursor] === ']') {
+      return { values, end: cursor + 1 };
+    }
+    const parsed = readJavaScriptStringLiteral(source, cursor);
+    if (!parsed) return null;
+    values.push(parsed.value);
+    cursor = parsed.end;
+    while (/\s/.test(source[cursor] || '')) cursor += 1;
+    if (source[cursor] === ']') {
+      return { values, end: cursor + 1 };
+    }
+    if (source[cursor] !== ',') return null;
+    cursor += 1;
+  }
+  return null;
+}
+
+function parseAllowedExecPrefixes(source) {
+  const prefixes = [];
+  for (const line of String(source || '').split(/\r?\n/)) {
+    if (!/decision\s*=\s*["']allow["']/.test(line)) continue;
+    const match = /prefix_rule\s*\(\s*pattern\s*=\s*/.exec(line);
+    if (!match) continue;
+    const parsed = readStaticStringArray(line, match.index + match[0].length);
+    if (parsed?.values.length) prefixes.push(parsed.values);
+  }
+  return prefixes;
+}
+
+function filterAutomaticallyAllowedAuthorization(approval, allowedPrefixes) {
+  const requests = Array.isArray(approval?.requests) ? approval.requests : [];
+  if (requests.length === 0 || !Array.isArray(allowedPrefixes)) return approval;
+  const pending = requests.filter((request) => (
+    !isAllowedExecPrefix(request.prefixRule, allowedPrefixes)
+  ));
+  if (pending.length === requests.length) return approval;
+  if (pending.length === 0) return null;
+  return buildRolloutAuthorization({
+    callId: approval.callId,
+    turnId: approval.turnId,
+    requests: pending
+  });
+}
+
+function isAllowedExecPrefix(prefixRule, allowedPrefixes) {
+  if (!Array.isArray(prefixRule) || prefixRule.length === 0) return false;
+  return allowedPrefixes.some((allowed) => (
+    Array.isArray(allowed) &&
+    allowed.length <= prefixRule.length &&
+    allowed.every((token, index) => token === prefixRule[index])
+  ));
+}
+
+function findCallObjectLiterals(source, callee) {
+  const value = String(source || '');
+  const masked = maskJavaScriptNonCode(value);
+  const objects = [];
+  let offset = 0;
+  while (offset < masked.length) {
+    const found = masked.indexOf(callee, offset);
+    if (found < 0) break;
+    let cursor = found + callee.length;
+    while (/\s/.test(masked[cursor] || '')) cursor += 1;
+    if (masked[cursor] !== '(') {
+      offset = cursor + 1;
+      continue;
+    }
+    cursor += 1;
+    while (/\s/.test(masked[cursor] || '')) cursor += 1;
+    if (masked[cursor] !== '{') {
+      offset = cursor + 1;
+      continue;
+    }
+    const end = findBalancedObjectEnd(masked, cursor);
+    if (end < 0) break;
+    objects.push(value.slice(cursor, end + 1));
+    offset = end + 1;
+  }
+  return objects;
+}
+
+function findBalancedObjectEnd(masked, start) {
+  let depth = 0;
+  for (let index = start; index < masked.length; index += 1) {
+    if (masked[index] === '{') depth += 1;
+    if (masked[index] !== '}') continue;
+    depth -= 1;
+    if (depth === 0) return index;
+  }
+  return -1;
+}
+
+function extractStaticStringProperty(source, name) {
+  return extractStaticStringProperties(source, name, { topLevelObject: true })[0] || '';
+}
+
+function extractStaticStringProperties(source, name, options = {}) {
+  const value = String(source || '');
+  const masked = maskJavaScriptNonCode(value);
+  const pattern = new RegExp(`\\b${escapeRegExp(name)}\\s*:`, 'g');
+  const depths = options.topLevelObject ? objectDepths(masked) : null;
+  const values = [];
+  let match;
+  while ((match = pattern.exec(masked))) {
+    if (depths && depths[match.index] !== 1) continue;
+    let cursor = match.index + match[0].length;
+    while (/\s/.test(value[cursor] || '')) cursor += 1;
+    const parsed = readJavaScriptStringLiteral(value, cursor);
+    if (parsed) values.push(parsed.value);
+  }
+  return values;
+}
+
+function objectDepths(masked) {
+  const depths = new Uint16Array(masked.length);
+  let depth = 0;
+  for (let index = 0; index < masked.length; index += 1) {
+    depths[index] = depth;
+    if (masked[index] === '{') depth += 1;
+    if (masked[index] === '}') depth = Math.max(0, depth - 1);
+  }
+  return depths;
+}
+
+function readJavaScriptStringLiteral(source, start) {
+  const quote = source[start];
+  if (!['"', "'", '`'].includes(quote)) return null;
+  let value = '';
+  for (let index = start + 1; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === quote) return { value, end: index + 1 };
+    if (quote === '`' && char === '$' && source[index + 1] === '{') {
+      return null;
+    }
+    if (char !== '\\') {
+      value += char;
+      continue;
+    }
+    index += 1;
+    if (index >= source.length) return null;
+    const escaped = source[index];
+    if (escaped === '\n') continue;
+    if (escaped === '\r') {
+      if (source[index + 1] === '\n') index += 1;
+      continue;
+    }
+    const simple = {
+      n: '\n',
+      r: '\r',
+      t: '\t',
+      b: '\b',
+      f: '\f',
+      v: '\v',
+      '0': '\0'
+    }[escaped];
+    if (simple !== undefined) {
+      value += simple;
+      continue;
+    }
+    if (escaped === 'x') {
+      const hex = source.slice(index + 1, index + 3);
+      if (!/^[0-9a-f]{2}$/i.test(hex)) return null;
+      value += String.fromCodePoint(Number.parseInt(hex, 16));
+      index += 2;
+      continue;
+    }
+    if (escaped === 'u') {
+      const braced = source[index + 1] === '{';
+      const end = braced ? source.indexOf('}', index + 2) : index + 5;
+      const hex = braced
+        ? source.slice(index + 2, end)
+        : source.slice(index + 1, end);
+      if (end < 0 || !/^[0-9a-f]{4,6}$/i.test(hex)) return null;
+      const codePoint = Number.parseInt(hex, 16);
+      if (codePoint > 0x10ffff) return null;
+      value += String.fromCodePoint(codePoint);
+      index = braced ? end : index + 4;
+      continue;
+    }
+    value += escaped;
+  }
+  return null;
+}
+
+function maskJavaScriptNonCode(source) {
+  const value = String(source || '');
+  const chars = value.split('');
+  let state = 'code';
+  for (let index = 0; index < chars.length; index += 1) {
+    const char = chars[index];
+    const next = chars[index + 1];
+    if (state === 'code') {
+      if (char === '/' && next === '/') {
+        chars[index] = chars[index + 1] = ' ';
+        index += 1;
+        state = 'line_comment';
+      } else if (char === '/' && next === '*') {
+        chars[index] = chars[index + 1] = ' ';
+        index += 1;
+        state = 'block_comment';
+      } else if (char === '"') {
+        chars[index] = ' ';
+        state = 'double';
+      } else if (char === "'") {
+        chars[index] = ' ';
+        state = 'single';
+      } else if (char === '`') {
+        chars[index] = ' ';
+        state = 'template';
+      }
+      continue;
+    }
+    if (state === 'line_comment') {
+      if (char === '\n') {
+        state = 'code';
+      } else {
+        chars[index] = ' ';
+      }
+      continue;
+    }
+    if (state === 'block_comment') {
+      chars[index] = char === '\n' ? '\n' : ' ';
+      if (char === '*' && next === '/') {
+        chars[index + 1] = ' ';
+        index += 1;
+        state = 'code';
+      }
+      continue;
+    }
+    chars[index] = char === '\n' ? '\n' : ' ';
+    if (char === '\\') {
+      if (index + 1 < chars.length) {
+        chars[index + 1] = chars[index + 1] === '\n' ? '\n' : ' ';
+        index += 1;
+      }
+      continue;
+    }
+    if (
+      (state === 'double' && char === '"') ||
+      (state === 'single' && char === "'") ||
+      (state === 'template' && char === '`')
+    ) {
+      state = 'code';
+    }
+  }
+  return chars.join('');
+}
+
+function dedupeEscalatedRequests(requests) {
+  const seen = new Set();
+  return requests.filter((request) => {
+    const signature = `${request.command || ''}\u0000${request.justification || ''}`;
+    if (seen.has(signature)) return false;
+    seen.add(signature);
+    return true;
+  });
+}
+
+function uniqueNonEmpty(values) {
+  return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function normalizeStartedAt(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : Date.now();
@@ -556,8 +1010,12 @@ function fileExists(fsImpl, target) {
 module.exports = {
   CodexRolloutReader,
   ROLLOUT_TURN_REPLACED_ERROR_CODE,
+  extractEscalatedExecRequests,
+  filterAutomaticallyAllowedAuthorization,
   locateSubmittedTurn,
   normalizeRolloutMessage,
+  parseAllowedExecPrefixes,
+  parseRolloutAuthorizationRequest,
   readIncrementalJsonl,
   readJsonlTail
 };
