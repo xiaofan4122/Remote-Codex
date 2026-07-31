@@ -207,18 +207,22 @@ class FeishuReplyStream {
       });
       return;
     } catch (error) {
-      if (!isStreamingTimeoutError(error)) {
+      if (!isRecoverableStreamingModeError(error)) {
         throw error;
       }
 
-      this.logger.event?.('feishu.stream.timeout.detected', errorLogMeta(error, {
+      const modeClosed = isStreamingModeClosedError(error);
+      const eventPrefix = modeClosed
+        ? 'feishu.stream.mode_closed'
+        : 'feishu.stream.timeout';
+      this.logger.event?.(`${eventPrefix}.detected`, errorLogMeta(error, {
         cardId: this.cardId,
         sequence,
         leaseAgeMs: this.now() - this.streamingModeOpenedAt
       }));
       const renewed = await this.renewStreamingModeIfNeeded({
         force: true,
-        reason: 'card_streaming_timeout'
+        reason: modeClosed ? 'card_streaming_mode_closed' : 'card_streaming_timeout'
       });
       if (!renewed) {
         throw error;
@@ -231,7 +235,7 @@ class FeishuReplyStream {
         text,
         sequence: this.sequence
       });
-      this.logger.event?.('feishu.stream.timeout.recovered', {
+      this.logger.event?.(`${eventPrefix}.recovered`, {
         cardId: this.cardId,
         sequence: this.sequence
       });
@@ -397,6 +401,17 @@ function isStreamingTimeoutError(error) {
   );
 }
 
+function isStreamingModeClosedError(error) {
+  if (Number(error?.code) === 300309) return true;
+  return /(?:\b300309\b|streaming mode is closed)/i.test(
+    String(error?.message || '')
+  );
+}
+
+function isRecoverableStreamingModeError(error) {
+  return isStreamingTimeoutError(error) || isStreamingModeClosedError(error);
+}
+
 function isOngoingInteractionError(error) {
   return Number(error?.code) === 200810 || /\b200810\b/.test(String(error?.message || ''));
 }
@@ -420,5 +435,7 @@ module.exports = {
   FEISHU_STREAM_RENEW_AFTER_MS,
   FeishuReplyStream,
   errorLogMeta,
+  isRecoverableStreamingModeError,
+  isStreamingModeClosedError,
   isStreamingTimeoutError
 };

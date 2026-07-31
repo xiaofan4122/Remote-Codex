@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const feishuModule = require('../src/plugins/feishu');
 const {
   FeishuReplyStream,
+  isStreamingModeClosedError,
   isStreamingTimeoutError
 } = require('../src/plugins/feishu/replyStream');
 
@@ -10,6 +11,7 @@ async function main() {
   await testStructuredCardKitError();
   await testProactiveLeaseRenewal();
   await testTimeoutRecovery();
+  await testClosedModeRecovery();
   await testPanelInteractionRetryReusesSequence();
   await testApprovalFeedbackPreservesProgressAndResumesStreaming();
   await testRenewalFailureLogging();
@@ -136,6 +138,44 @@ async function testTimeoutRecovery() {
   assert.ok(
     plugin.events.some(({ name }) => name === 'feishu.stream.timeout.recovered'),
     'the recovered timeout must be visible in structured diagnostics'
+  );
+}
+
+async function testClosedModeRecovery() {
+  const calls = [];
+  let updateAttempts = 0;
+  const plugin = createStreamPlugin({
+    async renewStreamingMode(payload) {
+      calls.push({ type: 'renew', ...payload });
+    },
+    async updateStreamingContent(payload) {
+      updateAttempts += 1;
+      calls.push({ type: 'update', ...payload });
+      if (updateAttempts === 1) {
+        const error = new Error(
+          'Feishu CardKit failed: 200 300309 ErrMsg: streaming mode is closed;'
+        );
+        error.code = 300309;
+        error.httpStatus = 200;
+        throw error;
+      }
+    }
+  });
+  const stream = createStream(plugin, {
+    streamRenewAfterMs: 60_000
+  });
+
+  await stream.update('十分钟后仍应更新的进展');
+
+  assert.deepEqual(
+    calls.map(({ type, sequence }) => [type, sequence]),
+    [['update', 2], ['renew', 3], ['update', 4]]
+  );
+  assert.equal(stream.currentText, '十分钟后仍应更新的进展');
+  assert.equal(isStreamingModeClosedError({ code: 300309 }), true);
+  assert.ok(
+    plugin.events.some(({ name }) => name === 'feishu.stream.mode_closed.recovered'),
+    'a silently closed CardKit stream must reopen and deliver the same update'
   );
 }
 
