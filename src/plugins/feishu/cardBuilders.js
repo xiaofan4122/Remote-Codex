@@ -596,12 +596,13 @@ function buildV2ButtonColumns(actions, idPrefix) {
     tag: 'column_set',
     flex_mode: 'none',
     background_style: 'default',
-    horizontal_spacing: 'small',
-    margin: '8px 0 0 0',
+    horizontal_spacing: 'medium',
+    margin: '12px 0 0 0',
     columns: actions.map((action, index) => ({
       tag: 'column',
-      width: 'auto',
-      vertical_align: 'top',
+      width: 'weighted',
+      weight: 1,
+      vertical_align: 'center',
       elements: [buildV2Button(action, `${idPrefix}_${index + 1}`)]
     }))
   };
@@ -616,6 +617,8 @@ function buildV2Button(action, elementId) {
     element_id: elementId.slice(0, 20),
     text: action.text,
     type: action.type || 'default',
+    width: 'fill',
+    size: 'large',
     behaviors: [
       {
         type: 'callback',

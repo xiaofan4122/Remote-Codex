@@ -13,11 +13,75 @@ async function main() {
   testFeishuPermissionPanelIsCompact();
   await testRemoteControlInputBuffer();
   await testStaleApprovalContextIsRejected();
+  await testFeishuCardActionTriggerAcknowledgesImmediately();
   await testFeishuCardActionUpdatesAndDedupes();
   await testFeishuNativeActionCompletionPatchesOriginalCard();
   await testFeishuPermissionModeCardActionKeepsPageContext();
   await testFeishuFollowupPanelAllowsSecondSubmit();
   console.log('Permission card action tests passed.');
+}
+
+async function testFeishuCardActionTriggerAcknowledgesImmediately() {
+  let releaseAction;
+  let actionFinished = false;
+  const actionBlocked = new Promise((resolve) => {
+    releaseAction = resolve;
+  });
+  const plugin = feishuPlugin.create({
+    config: {},
+    pluginConfig: {
+      mode: 'long_connection',
+      streaming: true,
+      appId: 'app',
+      appSecret: 'secret'
+    },
+    services: {
+      remoteController: {
+        async handleMessage() {
+          await actionBlocked;
+          actionFinished = true;
+        }
+      }
+    },
+    logger: {
+      event() {},
+      warn() {}
+    }
+  });
+
+  const response = plugin.handleCardActionTrigger({
+    action: {
+      value: {
+        remote_codex_action: 'approve',
+        remote_codex_context: 'approval-immediate-ack'
+      }
+    },
+    context: {
+      open_chat_id: 'oc_chat'
+    },
+    operator: {
+      operator_id: {
+        open_id: 'ou_user'
+      }
+    }
+  });
+
+  assert.equal(response instanceof Promise, false);
+  assert.deepEqual(response, {
+    toast: {
+      type: 'info',
+      content: '操作已提交',
+      i18n: {
+        zh_cn: '操作已提交',
+        en_us: 'Action submitted'
+      }
+    }
+  });
+  assert.equal(actionFinished, false);
+
+  releaseAction();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(actionFinished, true);
 }
 
 function approvalLines(selected = 1) {

@@ -460,6 +460,17 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
     approvalActions.map((action) => buttonCallbackValue(action).remote_codex_action),
     ['approve', 'approve_persistent', 'deny']
   );
+  const approvalColumns = approvalCard.body.elements
+    .find((element) => element.tag === 'column_set')
+    .columns;
+  assert.deepEqual(
+    approvalColumns.map((column) => [column.width, column.weight]),
+    [['weighted', 1], ['weighted', 1], ['weighted', 1]]
+  );
+  assert.deepEqual(
+    approvalActions.map((action) => [action.width, action.size]),
+    [['fill', 'large'], ['fill', 'large'], ['fill', 'large']]
+  );
   const approvalContext = buttonCallbackValue(approvalActions[0]).remote_codex_context;
   assert.match(approvalContext, /^[a-f0-9]{24}$/);
   assert.deepEqual(

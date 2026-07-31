@@ -117,7 +117,7 @@ class FeishuPlugin {
 
     const eventDispatcher = new Lark.EventDispatcher(dispatcherOptions).register({
       'im.message.receive_v1': async (data) => this.handleReceiveMessage(data),
-      'card.action.trigger': async (data) => this.handleCardAction(data)
+      'card.action.trigger': (data) => this.handleCardActionTrigger(data)
     });
 
     this.wsClient.start({ eventDispatcher });
@@ -639,6 +639,31 @@ class FeishuPlugin {
         });
       }
     }
+  }
+
+  handleCardActionTrigger(data) {
+    const action = normalizeCardAction(data);
+    if (!action.remoteAction) return {};
+
+    this.handleCardAction(data).catch((error) => {
+      this.logger.warn?.('Feishu background card action failed', {
+        error: String(error?.message || error || 'Unknown error'),
+        chatId: action.chatId,
+        messageId: action.messageId,
+        action: action.remoteAction
+      });
+    });
+
+    return {
+      toast: {
+        type: 'info',
+        content: '操作已提交',
+        i18n: {
+          zh_cn: '操作已提交',
+          en_us: 'Action submitted'
+        }
+      }
+    };
   }
 
   acquireCardActionLock(action) {
