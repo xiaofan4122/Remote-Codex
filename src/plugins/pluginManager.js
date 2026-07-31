@@ -96,6 +96,10 @@ class PluginManager {
     return instance.invoke(action, payload);
   }
 
+  getInstance(pluginId) {
+    return this.instances.get(pluginId) || null;
+  }
+
   getStatuses() {
     return this.listDescriptors().map((plugin) => {
       const instance = this.instances.get(plugin.id);

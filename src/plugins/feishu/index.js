@@ -19,6 +19,8 @@ const {
   buildPanelMarkdown,
   buildReplyCard,
   buildStreamingCard,
+  buildStreamingPanelCard,
+  buildStreamingModeConfig,
   getCompletedStreamingCardTemplate
 } = require('./cardBuilders');
 const {
@@ -67,6 +69,8 @@ class FeishuPlugin {
     this.replyStreamsByMessageId = new Map();
     this.latexRenderer = services?.latexRenderer || defaultLatexRenderer;
     this.latexImageKeys = new Map();
+    this.connectionWaiters = new Set();
+    this.lastConnectionError = '';
   }
 
   async start() {
@@ -80,7 +84,7 @@ class FeishuPlugin {
       throw new Error('Feishu appId and appSecret are required for long connection mode.');
     }
 
-    const Lark = requireLarkSdk();
+    const Lark = this.services?.larkSdk || requireLarkSdk();
     const baseConfig = {
       appId: this.pluginConfig.appId,
       appSecret: this.pluginConfig.appSecret
@@ -90,7 +94,16 @@ class FeishuPlugin {
     this.wsClient = new Lark.WSClient({
       ...baseConfig,
       loggerLevel: Lark.LoggerLevel?.info,
-      autoReconnect: true
+      autoReconnect: true,
+      handshakeTimeoutMs: 15000,
+      onReady: () => this.handleConnectionReady('ready'),
+      onError: (error) => this.handleConnectionError(error),
+      onReconnecting: () => {
+        this.logger.event?.('feishu.connection.reconnecting', {
+          appId: maskForLog(this.pluginConfig.appId)
+        });
+      },
+      onReconnected: () => this.handleConnectionReady('reconnected')
     });
 
     const dispatcherOptions = {};
@@ -115,6 +128,7 @@ class FeishuPlugin {
       await this.wsClient.close?.();
       this.wsClient = null;
     }
+    this.resolveConnectionWaiters(false);
   }
 
   getStatus() {
@@ -123,8 +137,55 @@ class FeishuPlugin {
       startedAt: this.startedAt,
       startedAtMs: this.startedAtMs,
       hasClient: Boolean(this.client),
-      hasWebsocket: Boolean(this.wsClient)
+      hasWebsocket: Boolean(this.wsClient),
+      connection: this.wsClient?.getConnectionStatus?.() || { state: 'idle' },
+      lastConnectionError: this.lastConnectionError
     };
+  }
+
+  waitUntilConnected(timeoutMs = 15000) {
+    const state = this.wsClient?.getConnectionStatus?.().state || 'idle';
+    if (state === 'connected') return Promise.resolve(true);
+    if (state === 'failed' || !this.wsClient) return Promise.resolve(false);
+
+    return new Promise((resolve) => {
+      const waiter = { resolve, timer: null };
+      waiter.timer = setTimeout(() => {
+        this.connectionWaiters.delete(waiter);
+        resolve(false);
+      }, Math.max(1, Number(timeoutMs) || 15000));
+      this.connectionWaiters.add(waiter);
+    });
+  }
+
+  handleConnectionReady(kind) {
+    this.lastConnectionError = '';
+    this.logger.event?.(`feishu.connection.${kind}`, {
+      appId: maskForLog(this.pluginConfig.appId)
+    });
+    this.resolveConnectionWaiters(true);
+  }
+
+  handleConnectionError(error) {
+    this.lastConnectionError = String(error?.message || error || 'Unknown connection error');
+    this.logger.warn?.('Feishu long connection failed', {
+      appId: maskForLog(this.pluginConfig.appId),
+      error: this.lastConnectionError
+    });
+    this.logger.event?.('feishu.connection.failed', {
+      appId: maskForLog(this.pluginConfig.appId),
+      error: this.lastConnectionError
+    });
+    this.resolveConnectionWaiters(false);
+  }
+
+  resolveConnectionWaiters(connected) {
+    const waiters = [...this.connectionWaiters];
+    this.connectionWaiters.clear();
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(Boolean(connected));
+    }
   }
 
   async invoke(action, payload = {}) {
@@ -491,6 +552,9 @@ class FeishuPlugin {
         reply: async (replyText) => {
           if (!action.chatId) return;
           if (action.messageId && isControlAckText(replyText)) {
+            if (this.replyStreamsByMessageId.has(action.messageId)) {
+              return;
+            }
             await this.updateActionCardState(action, {
               status: 'submitted',
               text: replyText
@@ -649,7 +713,7 @@ class FeishuPlugin {
     }
     const stream = this.replyStreamsByMessageId.get(action.messageId);
     if (stream) {
-      stream.showActionFeedback(action.remoteAction, action.page).catch((error) => {
+      await stream.showActionFeedback(action.remoteAction, action.page).catch((error) => {
         this.logger.warn?.('Feishu stream action feedback failed:', error.message);
       });
       return;
@@ -1166,6 +1230,72 @@ class FeishuPlugin {
     });
   }
 
+  async replaceStreamingPanel({ cardId, panel, sequence }) {
+    const card = buildStreamingPanelCard(panel);
+    await this.replaceStreamingCardEntity({
+      cardId,
+      card,
+      sequence,
+      operation: 'panel'
+    });
+  }
+
+  async replaceStreamingText({ cardId, title, text, sequence }) {
+    const card = buildStreamingCard({
+      title,
+      initialText: text,
+      controlMode: 'default'
+    });
+    await this.replaceStreamingCardEntity({
+      cardId,
+      card,
+      sequence,
+      operation: 'resume'
+    });
+  }
+
+  async replaceStreamingCardEntity({ cardId, card, sequence, operation }) {
+    await this.cardkitRequest(
+      `/cardkit/v1/cards/${encodeURIComponent(cardId)}`,
+      {
+        method: 'PUT',
+        body: {
+          card: {
+            type: 'card_json',
+            data: JSON.stringify(card)
+          },
+          sequence,
+          uuid: `remote_codex_${operation}_${cardId}_${sequence}`
+        }
+      }
+    );
+    this.logger.event?.('feishu.stream.card_replaced', {
+      cardId,
+      sequence,
+      operation
+    });
+  }
+
+  async renewStreamingMode({ cardId, sequence }) {
+    await this.cardkitRequest(
+      `/cardkit/v1/cards/${encodeURIComponent(cardId)}/settings`,
+      {
+        method: 'PATCH',
+        body: {
+          settings: JSON.stringify({
+            config: buildStreamingModeConfig()
+          }),
+          sequence,
+          uuid: `remote_codex_stream_renew_${cardId}_${sequence}`
+        }
+      }
+    );
+    this.logger.event?.('feishu.stream.renewed', {
+      cardId,
+      sequence
+    });
+  }
+
   async closeStreamingCard({
     cardId,
     sequence,
@@ -1212,9 +1342,14 @@ class FeishuPlugin {
 
     const result = await response.json().catch(() => ({}));
     if (!response.ok || result.code) {
-      throw new Error(
+      const error = new Error(
         `Feishu CardKit failed: ${response.status} ${result.code || ''} ${result.msg || ''}`.trim()
       );
+      error.name = 'FeishuCardKitError';
+      error.httpStatus = response.status;
+      error.code = result.code || null;
+      error.feishuMessage = String(result.msg || '');
+      throw error;
     }
     return result;
   }
@@ -1784,6 +1919,12 @@ function clipForLog(text, max = 1200) {
   return `${value.slice(0, max)}...[truncated]`;
 }
 
+function maskForLog(value) {
+  const text = String(value || '');
+  if (text.length <= 10) return text;
+  return `${text.slice(0, 6)}...${text.slice(-4)}`;
+}
+
 function formatBotMenuCommandSummary() {
   return FEISHU_BOT_MENU_COMMANDS
     .map(({ label, command }) => `${label} \`${command}\``)
@@ -1800,6 +1941,7 @@ module.exports.__private = {
   buildPanelMarkdown,
   buildStreamingActionFeedback,
   buildStreamingCard,
+  buildStreamingModeConfig,
   formatBotMenuCommandSummary,
   formatCardMarkdown,
   parseTextContent

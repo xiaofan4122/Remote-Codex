@@ -1,0 +1,109 @@
+name: Linux Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Linux ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            deb_arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            deb_arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify tag and package version
+        run: node scripts/prepare-release-version.js "$GITHUB_REF_NAME" dist
+
+      - name: Run deterministic checks
+        run: npm run check
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Build packages
+        run: bash scripts/build-linux-release-container.sh "${{ matrix.arch }}"
+
+      - name: Smoke-test the real Linux archive
+        run: npm run smoke:linux-artifact -- "${{ matrix.arch }}"
+
+      - name: Upload architecture assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: |
+            dist/remote-codex-linux-${{ matrix.arch }}.tar.gz
+            dist/remote-codex-linux-${{ matrix.arch }}.tar.gz.sha256
+            dist/remote-codex-linux-${{ matrix.deb_arch }}.deb
+            dist/remote-codex-linux-${{ matrix.deb_arch }}.deb.sha256
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download all Linux assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: linux-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Write stable latest-version asset
+        run: node scripts/prepare-release-version.js "$GITHUB_REF_NAME" release-assets
+
+      - name: Publish immutable build outputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          --verify-tag
+          --generate-notes
+          --title "Remote Codex $GITHUB_REF_NAME"
+          release-assets/remote-codex-version.txt
+          release-assets/remote-codex-linux-x64.tar.gz
+          release-assets/remote-codex-linux-x64.tar.gz.sha256
+          release-assets/remote-codex-linux-amd64.deb
+          release-assets/remote-codex-linux-amd64.deb.sha256
+          release-assets/remote-codex-linux-arm64.tar.gz
+          release-assets/remote-codex-linux-arm64.tar.gz.sha256
+          release-assets/remote-codex-linux-arm64.deb
+          release-assets/remote-codex-linux-arm64.deb.sha256
+          install.sh

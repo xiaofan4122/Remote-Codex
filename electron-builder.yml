@@ -1,0 +1,62 @@
+appId: io.github.xiaofan4122.remote-codex
+productName: Remote Codex
+copyright: Copyright © 2026 Remote Codex contributors
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - src/**/*
+  - package.json
+
+asar: true
+asarUnpack:
+  - node_modules/node-pty/**/*
+  - node_modules/@resvg/resvg-wasm/**/*
+npmRebuild: true
+removePackageScripts: true
+electronLanguages:
+  - en-US
+  - zh-CN
+
+extraResources:
+  - from: skills
+    to: skills
+    filter:
+      - "**/*"
+  - from: scripts/uninstall-linux.sh
+    to: install/uninstall-linux.sh
+  - from: build/icons/512x512.png
+    to: icon.png
+
+extraFiles:
+  - from: LICENSE
+    to: LICENSE
+
+linux:
+  target:
+    - tar.gz
+    - deb
+  artifactName: remote-codex-linux-${arch}.${ext}
+  category: Development
+  executableName: remote-codex
+  syncDesktopName: true
+  icon: build/icons/512x512.png
+  maintainer: Remote Codex contributors
+  vendor: Remote Codex contributors
+  synopsis: Control the native Codex CLI locally and from Feishu
+  description: >-
+    A Linux desktop shell around the native Codex CLI with a visible PTY,
+    semantic rollout replies, Feishu remote control, LaTeX rendering, and
+    workspace-bound file delivery.
+  desktop:
+    entry:
+      Name: Remote Codex
+      Comment: Control the native Codex CLI locally and from Feishu
+      Categories: Development;Utility;
+      StartupNotify: "true"
+
+deb:
+  packageName: remote-codex
+  priority: optional

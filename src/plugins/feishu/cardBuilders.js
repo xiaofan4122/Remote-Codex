@@ -387,25 +387,10 @@ function buildStreamingCard({ title, initialText, controlMode = 'default' }) {
     schema: '2.0',
     config: buildCardConfig({
       update_multi: true,
-      streaming_mode: true,
       summary: {
         content: 'Remote Codex 正在处理'
       },
-      streaming_config: {
-        print_frequency_ms: {
-          default: 10,
-          pc: 10,
-          ios: 15,
-          android: 15
-        },
-        print_step: {
-          default: 80,
-          pc: 100,
-          ios: 60,
-          android: 60
-        },
-        print_strategy: 'fast'
-      }
+      ...buildStreamingModeConfig()
     }),
     header: {
       template: getStreamingCardTemplate(controlMode),
@@ -420,6 +405,72 @@ function buildStreamingCard({ title, initialText, controlMode = 'default' }) {
     },
     body: {
       elements
+    }
+  };
+}
+
+function buildStreamingPanelCard(panel = {}) {
+  const actions = buildPanelActions(panel);
+  const text = buildPanelMarkdown(panel);
+  const elements = [
+    {
+      tag: 'markdown',
+      element_id: STREAM_CONTENT_ELEMENT_ID,
+      content: formatCardMarkdown(text)
+    }
+  ];
+  if (actions.length > 0) {
+    elements.push({
+      tag: 'action',
+      actions
+    });
+  }
+
+  return {
+    schema: '2.0',
+    config: buildCardConfig({
+      update_multi: true,
+      summary: {
+        content: panel.kind === 'permission'
+          ? 'Remote Codex 等待权限确认'
+          : 'Remote Codex 等待操作'
+      },
+      ...buildStreamingModeConfig()
+    }),
+    header: {
+      template: getPanelTemplate(panel),
+      title: {
+        tag: 'plain_text',
+        content: panel.title || 'Remote Codex'
+      },
+      subtitle: {
+        tag: 'plain_text',
+        content: panel.kind === 'permission' ? '等待确认' : '等待操作'
+      }
+    },
+    body: {
+      elements
+    }
+  };
+}
+
+function buildStreamingModeConfig() {
+  return {
+    streaming_mode: true,
+    streaming_config: {
+      print_frequency_ms: {
+        default: 10,
+        pc: 10,
+        ios: 15,
+        android: 15
+      },
+      print_step: {
+        default: 80,
+        pc: 100,
+        ios: 60,
+        android: 60
+      },
+      print_strategy: 'fast'
     }
   };
 }
@@ -563,5 +614,7 @@ module.exports = {
   buildPanelMarkdown,
   buildReplyCard,
   buildStreamingCard,
+  buildStreamingPanelCard,
+  buildStreamingModeConfig,
   getCompletedStreamingCardTemplate
 };

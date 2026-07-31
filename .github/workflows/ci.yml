@@ -1,0 +1,57 @@
+name: Linux CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-package:
+    name: Test and package Linux x64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run deterministic checks
+        run: npm run check
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Build Linux x64 release assets
+        run: bash scripts/build-linux-release-container.sh x64
+
+      - name: Smoke-test the real Linux archive
+        run: npm run smoke:linux-artifact -- x64
+
+      - name: Upload package smoke-test artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-codex-linux-x64-ci
+          path: |
+            dist/remote-codex-linux-x64.tar.gz
+            dist/remote-codex-linux-x64.tar.gz.sha256
+            dist/remote-codex-linux-amd64.deb
+            dist/remote-codex-linux-amd64.deb.sha256
+          if-no-files-found: error
+          retention-days: 7

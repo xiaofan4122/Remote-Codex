@@ -1,22 +1,85 @@
 # Remote Codex
 
-Remote-friendly Codex CLI monitor and controller.
+Linux desktop and Feishu remote-control shell for the native Codex CLI.
 
-## Setup
+> **Linux only.** Remote Codex intentionally focuses on Linux, where an
+> official Codex desktop client is not currently the project's target. macOS
+> and Windows builds are not produced or supported.
+
+## Install on Linux
+
+Requirements:
+
+- A glibc 2.31 or newer Linux distribution, such as Ubuntu 20.04+, on `x86_64`
+  or `arm64`.
+- The native `codex` command available on `PATH` and signed in.
+- `curl` or `wget`, `tar`, and `sha256sum` for the one-line installer.
+
+Install the latest release for the current user; no `sudo` or local Node.js
+toolchain is required:
 
 ```bash
-npm install
+curl -fsSL https://raw.githubusercontent.com/xiaofan4122/Remote-Codex/main/install.sh | bash
+```
+
+The installer downloads the matching prebuilt GitHub Release, verifies its
+SHA-256 checksum, installs it under `~/.local/opt/remote-codex`, creates the
+`remote-codex` command and desktop entry, and installs the bundled
+`remote-codex-send-files` skill. It does not edit shell startup files.
+
+Start from a project directory:
+
+```bash
+cd /path/to/project
+remote-codex
+```
+
+Running the install command again performs an idempotent update. Install a
+specific tagged version with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xiaofan4122/Remote-Codex/main/install.sh |
+  bash -s -- --version 0.1.0
+```
+
+Uninstall the application and its managed Codex skill while preserving user
+configuration:
+
+```bash
+remote-codex-uninstall
+```
+
+Prebuilt `.deb` files and portable `.tar.gz` archives for both supported
+architectures are also attached to every GitHub Release. The `.deb` install
+path installs or refreshes the bundled skill when the application first
+starts.
+
+Release filenames use `x64` for portable archives and Debian's native `amd64`
+name for x64 `.deb` packages; ARM64 uses `arm64` for both.
+
+For a more inspectable installation flow, download `install.sh`, review it,
+then run it locally instead of piping it directly to Bash.
+
+## Develop From Source
+
+```bash
+npm ci
 npm start
 ```
 
-The app expects `codex` to be available on `PATH`. Run `codex --login` in your normal terminal first if you have not logged in.
+Development requires Node.js 22.12 or newer. The app expects `codex` to be
+available on `PATH`; complete Codex authentication in a normal terminal first.
+Electron's Linux binary is downloaded once by `npm ci` and then kept in the
+local dependency/cache directories. `npm start` only launches that installed
+binary and does not perform a download. Release installations use the bundled
+Electron runtime and require neither Node.js nor an Electron download.
 Remote Codex starts Codex with `--no-alt-screen` by default so the desktop
 terminal keeps a usable scrollback history instead of losing content to TUI
 screen redraws.
 
 ## App Launcher
 
-Install user-level launchers:
+When running from a source checkout, install developer launchers with:
 
 ```bash
 npm run install:launchers
@@ -66,10 +129,37 @@ Or start the background API with:
 remote-codex-api
 ```
 
-The installer writes launchers to `~/.local/bin`, creates a desktop file under
+This source-checkout helper writes launchers to `~/.local/bin`, creates a desktop file under
 `~/.local/share/applications`, and makes sure `~/.local/bin` is available from
 both zsh and bash. It also installs or updates the bundled file-send skill. If
 you move this project directory, run the installer again.
+
+Release builds are Linux-only:
+
+```bash
+npm run dist:linux:x64
+npm run dist:linux:arm64
+```
+
+Official artifacts are built reproducibly inside the pinned Debian 11 / Node
+22 container so their native modules retain a glibc 2.31 compatibility floor:
+
+```bash
+bash scripts/build-linux-release-container.sh x64
+bash scripts/build-linux-release-container.sh arm64
+npm run smoke:linux-artifact -- x64
+```
+
+The container build mounts the checkout read-only, installs dependencies in an
+isolated temporary workspace, reuses persistent npm/Electron build caches, and
+copies only the finished archives and checksums into `dist/`. It never replaces
+the source checkout's `node_modules`.
+
+Run the complete deterministic test and syntax suite with:
+
+```bash
+npm run check
+```
 
 ## Configuration
 
@@ -186,6 +276,32 @@ to `false` only when legacy segmented cards are explicitly required.
 The rollout reader tails appended JSONL records at a short polling interval, so
 commentary can be delivered while Codex is still running. `task_complete`
 closes the turn; visible terminal idle timing does not synthesize a final reply.
+For long-running turns, Remote Codex proactively renews CardKit streaming mode
+before Feishu's ten-minute lease expires. If Feishu still returns CardKit error
+`200510`, the same card is reopened and the failed update is retried with a new,
+strictly increasing sequence number.
+
+After the first authorization, `Reconnect Feishu` reuses the saved App ID and
+App Secret and restarts only the long-connection transport. It does not create a
+replacement bot. Because the remote controller remains alive and the same chat
+ID is reused, the chat stays attached to the current visible Codex PTY. A failed
+reconnect is reported as an error instead of silently registering another app.
+
+### Multiple instances
+
+The Linux desktop is single-instance by default. Starting `remote-codex` again
+focuses the existing window instead of opening another Codex session or another
+Feishu long connection.
+
+Do not bypass this protection and connect multiple Remote Codex processes to the
+same Feishu App ID/App Secret. Feishu can deliver inbound events to a different
+long connection, while each process keeps its current Codex task, card ID, and
+CardKit sequence in local memory. That can route a command to the wrong project,
+create duplicate cards, or leave card actions and updates owned by different
+processes. Intentional parallel deployments should use separate Linux
+users/containers, separate configuration and Codex data, and a separate Feishu
+app for each instance. The independent headless API process does not create a
+Feishu connection unless it is configured to do so.
 
 Final answers can contain block LaTeX (`\\[...\\]`, `$$...$$`, or a standalone
 `[...]` math block) and inline LaTeX (`\\(...\\)` or `$...$`). Remote Codex

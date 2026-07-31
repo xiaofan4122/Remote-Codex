@@ -1,4 +1,7 @@
 node_modules/
+dist/
+build/CMakeFiles/
+/current-screen.png
 config.json
 *.local.json
 *.log

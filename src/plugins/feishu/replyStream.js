@@ -3,6 +3,9 @@ const { summarizeForCard } = require('./cardMarkdown');
 
 const FEISHU_STREAM_MIN_UPDATE_INTERVAL_MS = 110;
 const FEISHU_STREAM_CLOSE_RETRY_MS = 250;
+const FEISHU_STREAM_LEASE_MS = 10 * 60 * 1000;
+const FEISHU_STREAM_RENEW_AFTER_MS = 8 * 60 * 1000;
+const FEISHU_STREAM_RENEW_RETRY_MS = 5 * 1000;
 
 class FeishuReplyStream {
   constructor({
@@ -14,7 +17,12 @@ class FeishuReplyStream {
     completedTemplate = 'green',
     completedSubtitle = '已完成',
     renderLatex = false,
-    logger = console
+    logger = console,
+    now = Date.now,
+    wait = delay,
+    minUpdateIntervalMs = FEISHU_STREAM_MIN_UPDATE_INTERVAL_MS,
+    streamRenewAfterMs = FEISHU_STREAM_RENEW_AFTER_MS,
+    streamRenewRetryMs = FEISHU_STREAM_RENEW_RETRY_MS
   }) {
     this.plugin = plugin;
     this.cardId = cardId;
@@ -25,23 +33,56 @@ class FeishuReplyStream {
     this.completedSubtitle = completedSubtitle || '已完成';
     this.renderLatex = Boolean(renderLatex);
     this.logger = logger;
+    this.now = typeof now === 'function' ? now : Date.now;
+    this.wait = typeof wait === 'function' ? wait : delay;
+    this.minUpdateIntervalMs = Math.max(0, Number(minUpdateIntervalMs) || 0);
+    this.streamRenewAfterMs = Math.max(0, Number(streamRenewAfterMs) || 0);
+    this.streamRenewRetryMs = Math.max(0, Number(streamRenewRetryMs) || 0);
     this.sequence = 1;
     this.currentText = '';
     this.targetText = '';
     this.flushPromise = null;
     this.lastUpdateAt = 0;
+    this.streamingModeOpenedAt = this.now();
+    this.lastRenewalAttemptAt = Number.NEGATIVE_INFINITY;
     this.closed = false;
     this.actionFeedbackText = '';
+    this.panelActive = false;
   }
 
   async update(text) {
     this.actionFeedbackText = '';
+    if (this.panelActive) {
+      return this.replacePanelWithText(text);
+    }
     return this.setTargetText(text);
   }
 
   async replace(text) {
     this.actionFeedbackText = '';
+    if (this.panelActive) {
+      return this.replacePanelWithText(text);
+    }
     return this.setTargetText(text);
+  }
+
+  async showPanel(panel) {
+    if (this.closed) return;
+    if (this.flushPromise) {
+      await this.flushPromise;
+    }
+    this.sequence += 1;
+    await this.plugin.replaceStreamingPanel({
+      cardId: this.cardId,
+      panel,
+      sequence: this.sequence
+    });
+    const text = String(panel?.fallbackText || panel?.progressText || panel?.message || '').trim();
+    this.currentText = text;
+    this.targetText = text;
+    this.lastUpdateAt = this.now();
+    this.actionFeedbackText = '';
+    this.panelActive = true;
   }
 
   async showActionFeedback(action, page = '') {
@@ -51,7 +92,29 @@ class FeishuReplyStream {
       currentText: this.targetText || this.currentText
     });
     this.actionFeedbackText = text;
+    if (this.panelActive) {
+      return this.replacePanelWithText(text);
+    }
     return this.setTargetText(text);
+  }
+
+  async replacePanelWithText(text) {
+    const nextText = String(text || '').trim();
+    if (!nextText || this.closed) return;
+    if (this.flushPromise) {
+      await this.flushPromise;
+    }
+    this.sequence += 1;
+    await this.plugin.replaceStreamingText({
+      cardId: this.cardId,
+      title: this.title,
+      text: nextText,
+      sequence: this.sequence
+    });
+    this.currentText = nextText;
+    this.targetText = nextText;
+    this.lastUpdateAt = this.now();
+    this.panelActive = false;
   }
 
   setCompletionState({ title, template, subtitle } = {}) {
@@ -78,28 +141,111 @@ class FeishuReplyStream {
     while (!this.closed && this.targetText && this.targetText !== this.currentText) {
       const waitMs = Math.max(
         0,
-        FEISHU_STREAM_MIN_UPDATE_INTERVAL_MS - (Date.now() - this.lastUpdateAt)
+        this.minUpdateIntervalMs - (this.now() - this.lastUpdateAt)
       );
       if (waitMs) {
-        await delay(waitMs);
+        await this.wait(waitMs);
       }
       if (this.closed || !this.targetText || this.targetText === this.currentText) {
         break;
       }
 
       const nextText = this.targetText;
+      await this.renewStreamingModeIfNeeded();
       this.sequence += 1;
-      const sequence = this.sequence;
-      await this.plugin.updateStreamingContent({
-        cardId: this.cardId,
-        elementId: this.elementId,
-        text: nextText,
-        sequence
-      });
-      this.lastUpdateAt = Date.now();
+      await this.updateStreamingContentWithRecovery(nextText, this.sequence);
+      this.lastUpdateAt = this.now();
       if (this.targetText === nextText) {
         this.currentText = nextText;
       }
+    }
+  }
+
+  async updateStreamingContentWithRecovery(text, sequence) {
+    try {
+      await this.plugin.updateStreamingContent({
+        cardId: this.cardId,
+        elementId: this.elementId,
+        text,
+        sequence
+      });
+      return;
+    } catch (error) {
+      if (!isStreamingTimeoutError(error)) {
+        throw error;
+      }
+
+      this.logger.event?.('feishu.stream.timeout.detected', errorLogMeta(error, {
+        cardId: this.cardId,
+        sequence,
+        leaseAgeMs: this.now() - this.streamingModeOpenedAt
+      }));
+      const renewed = await this.renewStreamingModeIfNeeded({
+        force: true,
+        reason: 'card_streaming_timeout'
+      });
+      if (!renewed) {
+        throw error;
+      }
+
+      this.sequence += 1;
+      await this.plugin.updateStreamingContent({
+        cardId: this.cardId,
+        elementId: this.elementId,
+        text,
+        sequence: this.sequence
+      });
+      this.logger.event?.('feishu.stream.timeout.recovered', {
+        cardId: this.cardId,
+        sequence: this.sequence
+      });
+    }
+  }
+
+  async renewStreamingModeIfNeeded({ force = false, reason = 'lease_expiring' } = {}) {
+    if (typeof this.plugin.renewStreamingMode !== 'function') {
+      return false;
+    }
+
+    const now = this.now();
+    const leaseAgeMs = now - this.streamingModeOpenedAt;
+    if (!force && leaseAgeMs < this.streamRenewAfterMs) {
+      return false;
+    }
+    if (!force && now - this.lastRenewalAttemptAt < this.streamRenewRetryMs) {
+      return false;
+    }
+
+    this.lastRenewalAttemptAt = now;
+    this.sequence += 1;
+    const sequence = this.sequence;
+    try {
+      await this.plugin.renewStreamingMode({
+        cardId: this.cardId,
+        sequence
+      });
+      this.streamingModeOpenedAt = this.now();
+      this.logger.event?.('feishu.stream.lease.renewed', {
+        cardId: this.cardId,
+        sequence,
+        reason,
+        leaseAgeMs
+      });
+      return true;
+    } catch (error) {
+      this.logger.warn?.('Feishu stream lease renewal failed', errorLogMeta(error, {
+        cardId: this.cardId,
+        sequence,
+        reason,
+        leaseAgeMs
+      }));
+      this.logger.event?.('feishu.stream.lease.renewal_failed', errorLogMeta(error, {
+        cardId: this.cardId,
+        sequence,
+        reason,
+        leaseAgeMs
+      }));
+      return false;
     }
   }
 
@@ -109,7 +255,9 @@ class FeishuReplyStream {
     let preparedContent = null;
     if (this.renderLatex && !this.actionFeedbackText) {
       preparedContent = await this.plugin.prepareFinalCardContent(sourceText).catch((error) => {
-        this.logger.warn?.('Feishu final LaTeX preparation failed:', error.message);
+        this.logger.warn?.('Feishu final LaTeX preparation failed', errorLogMeta(error, {
+          cardId: this.cardId
+        }));
         return null;
       });
     }
@@ -118,7 +266,9 @@ class FeishuReplyStream {
     if (!preparedContent?.elements) {
       await this.update(finalText).catch((error) => {
         finalUpdateError = error;
-        this.logger.warn?.('Feishu stream final update failed:', error.message);
+        this.logger.warn?.('Feishu stream final update failed', errorLogMeta(error, {
+          cardId: this.cardId
+        }));
       });
     }
     this.closed = true;
@@ -167,7 +317,10 @@ class FeishuReplyStream {
       } catch (error) {
         lastError = error;
         if (attempt >= 2) break;
-        this.logger.warn?.('Feishu stream close retry:', error.message);
+        this.logger.warn?.('Feishu stream close retry', errorLogMeta(error, {
+          cardId: this.cardId,
+          attempt
+        }));
         this.logger.event?.('feishu.stream.close.retry', {
           cardId: this.cardId,
           attempt,
@@ -197,6 +350,31 @@ function clipForLog(text, max = 1200) {
   return `${value.slice(0, max)}...[truncated]`;
 }
 
+function isStreamingTimeoutError(error) {
+  if (Number(error?.code) === 200510) return true;
+  return /(?:\b200510\b|card streaming timeout|streaming timeout)/i.test(
+    String(error?.message || '')
+  );
+}
+
+function errorLogMeta(error, extra = {}) {
+  const meta = {
+    ...extra,
+    error: String(error?.message || error || 'Unknown error')
+  };
+  if (error?.code !== undefined && error?.code !== null && error?.code !== '') {
+    meta.code = error.code;
+  }
+  if (error?.httpStatus !== undefined && error?.httpStatus !== null) {
+    meta.httpStatus = error.httpStatus;
+  }
+  return meta;
+}
+
 module.exports = {
-  FeishuReplyStream
+  FEISHU_STREAM_LEASE_MS,
+  FEISHU_STREAM_RENEW_AFTER_MS,
+  FeishuReplyStream,
+  errorLogMeta,
+  isStreamingTimeoutError
 };

@@ -16,6 +16,9 @@ const { RawOutputRecorder } = require('./rawOutputRecorder');
 const { parseLaunchOptions, buildCodexArgs } = require('./launchOptions');
 const { buildResumeHint } = require('./resumeHint');
 const { buildRemoteInputNotice } = require('./remoteVisualNotice');
+const { installBundledSkill } = require('./bundledSkillInstaller');
+const { configureSingleInstance } = require('./singleInstanceCoordinator');
+const { connectOrReconnectFeishu } = require('./feishuConnectionCoordinator');
 
 let mainWindow;
 let currentSession;
@@ -43,6 +46,14 @@ const MAIN_I18N = {
 };
 
 const logger = createLogger();
+const hasSingleInstanceLock = configureSingleInstance({
+  app,
+  getMainWindow: () => mainWindow,
+  logger
+});
+if (hasSingleInstanceLock) {
+  installPackagedSkill();
+}
 const diagnosticOutputRecorder = createDiagnosticOutputRecorder(logger);
 const manager = new CodexSessionManager({
   config,
@@ -51,6 +62,29 @@ const manager = new CodexSessionManager({
 const execRunner = new CodexExecRunner({ config, logger });
 const appServerRunner = new CodexAppServerRunner({ config, logger });
 const rolloutReader = new CodexRolloutReader({ logger });
+
+function installPackagedSkill() {
+  try {
+    const result = installBundledSkill({
+      packaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      version: app.getVersion()
+    });
+    if (result.installed) {
+      logger.info('Bundled Codex skill ready', {
+        changed: result.changed,
+        targetDir: result.targetDir
+      });
+    } else {
+      logger.warn('Bundled Codex skill source is unavailable', {
+        sourceDir: result.sourceDir,
+        reason: result.reason
+      });
+    }
+  } catch (error) {
+    logger.warn('Failed to install bundled Codex skill', { error: error.message });
+  }
+}
 
 function createDiagnosticOutputRecorder(diagnosticLogger) {
   if (!/^(1|true|yes|on)$/i.test(String(process.env.REMOTE_CODEX_DIAGNOSTIC_CAPTURE || ''))) {
@@ -298,9 +332,12 @@ function startCodex(cwd = config.codex.defaultCwd) {
   return session;
 }
 
-app.whenReady().then(() => {
-  createPluginRuntime();
-  createWindow();
+if (!hasSingleInstanceLock) {
+  // configureSingleInstance already requested shutdown before plugin startup.
+} else {
+  app.whenReady().then(() => {
+    createPluginRuntime();
+    createWindow();
 
   ipcMain.handle('session:start', (_event, cwd) => {
     startCodex(cwd || config.codex.defaultCwd);
@@ -344,6 +381,11 @@ app.whenReady().then(() => {
 
   ipcMain.handle('feishu:connect-start', async (_event, nextConfig) => {
     if (nextConfig && typeof nextConfig === 'object') {
+      const nextFeishu = nextConfig.plugins?.feishu;
+      if (nextFeishu?.appId && nextFeishu?.appSecret) {
+        nextFeishu.enabled = true;
+        nextFeishu.mode = 'long_connection';
+      }
       config = saveConfig(nextConfig);
       manager.updateConfig(config);
       execRunner.updateConfig(config);
@@ -352,7 +394,13 @@ app.whenReady().then(() => {
       mainWindow?.webContents.send('config:updated', config);
     }
 
-    return getFeishuRegistrationManager().start();
+    return connectOrReconnectFeishu({
+      config,
+      restartPlugins,
+      getFeishuPlugin: () => pluginManager?.getInstance('feishu'),
+      registrationManager: getFeishuRegistrationManager(),
+      logger
+    });
   });
 
   ipcMain.handle('feishu:connect-cancel', () => {
@@ -396,10 +444,11 @@ app.whenReady().then(() => {
     logger.error('Failed to start plugins', { error: error.message });
   });
 
-  app.on('activate', () => {
-    if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+    app.on('activate', () => {
+      if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+    });
   });
-});
+}
 
 app.on('before-quit', () => {
   feishuRegistrationManager?.cancel();
@@ -490,6 +539,7 @@ function ingestTerminalSnapshot(text) {
     currentSession.visualStyledViewportSnapshot = normalizeStyledSnapshot(
       snapshot.styledViewport
     );
+    currentSession.emit('snapshot', snapshot);
     return;
   }
 
@@ -498,6 +548,7 @@ function ingestTerminalSnapshot(text) {
   currentSession.visualViewportSnapshot = String(text || '');
   currentSession.visualStyledSnapshot = null;
   currentSession.visualStyledViewportSnapshot = null;
+  currentSession.emit('snapshot', text);
 }
 
 function normalizeStyledSnapshot(snapshot) {

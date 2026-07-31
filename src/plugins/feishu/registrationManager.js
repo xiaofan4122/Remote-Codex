@@ -1,10 +1,11 @@
 const QRCode = require('qrcode');
 
 class FeishuRegistrationManager {
-  constructor({ onUpdate, onComplete, logger = console }) {
+  constructor({ onUpdate, onComplete, logger = console, larkSdk = null }) {
     this.onUpdate = onUpdate;
     this.onComplete = onComplete;
     this.logger = logger;
+    this.larkSdk = larkSdk;
     this.controller = null;
     this.promise = null;
     this.state = {
@@ -17,7 +18,7 @@ class FeishuRegistrationManager {
       return this.getStatus();
     }
 
-    const Lark = requireLarkSdk();
+    const Lark = this.larkSdk || requireLarkSdk();
     this.controller = new AbortController();
     this.update({
       status: 'starting',
@@ -31,12 +32,17 @@ class FeishuRegistrationManager {
       errorCode: ''
     });
 
-    this.promise = Lark.registerApp({
+    const registrationOptions = {
       source: options.source || 'remote-codex',
       signal: this.controller.signal,
       onQRCodeReady: (info) => this.handleQRCodeReady(info),
       onStatusChange: (info) => this.handleStatusChange(info)
-    })
+    };
+    if (options.appId) {
+      registrationOptions.appId = String(options.appId);
+    }
+
+    this.promise = Lark.registerApp(registrationOptions)
       .then(async (result) => {
         const completion = await this.onComplete?.(result);
         const pluginError = completion?.pluginError || '';
@@ -83,6 +89,37 @@ class FeishuRegistrationManager {
 
   getStatus() {
     return { ...this.state };
+  }
+
+  completeExistingConnection({ appId, userOpenId = '', tenantBrand = '', connectedAt = '' }) {
+    this.update({
+      status: 'complete',
+      message: 'Feishu reconnected with the saved app. The existing bot and Codex session binding were preserved.',
+      connectionMode: 'existing_app',
+      appId: String(appId || ''),
+      userOpenId: String(userOpenId || ''),
+      tenantBrand: String(tenantBrand || ''),
+      connectedAt: connectedAt || new Date().toISOString(),
+      pluginError: '',
+      errorCode: '',
+      url: '',
+      qrDataUrl: ''
+    });
+    return this.getStatus();
+  }
+
+  failExistingConnection({ appId, error }) {
+    this.update({
+      status: 'error',
+      message: `Could not reconnect the saved Feishu app: ${error}`,
+      connectionMode: 'existing_app',
+      appId: String(appId || ''),
+      pluginError: String(error || ''),
+      errorCode: 'existing_app_reconnect_failed',
+      url: '',
+      qrDataUrl: ''
+    });
+    return this.getStatus();
   }
 
   handleQRCodeReady(info) {

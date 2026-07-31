@@ -1222,6 +1222,10 @@ class RemoteSessionController {
       this.queueOutput(state, chunk.data);
     };
 
+    state.snapshotListener = () => {
+      this.queueOutput(state, '');
+    };
+
     state.exitListener = ({ exitCode, signal }) => {
       this.sessions.delete(key);
       this.clearStreamHeartbeat(state);
@@ -1238,6 +1242,7 @@ class RemoteSessionController {
     };
 
     session.on('data', state.dataListener);
+    session.on('snapshot', state.snapshotListener);
     session.on('exit', state.exitListener);
 
     this.sessions.set(key, state);
@@ -1560,6 +1565,7 @@ class RemoteSessionController {
     this.refreshSessionPhase(state, 'control_sent');
     if (approvalAction) {
       state.outputBuffer = '';
+      this.scheduleStreamHeartbeat(state);
     }
     this.logger.event?.('remote.control.sent', {
       pluginId: message.pluginId,
@@ -1620,7 +1626,7 @@ class RemoteSessionController {
         return;
       }
       const approval = this.getApprovalPrompt(state, output);
-      if (approval && !state.replyStream) {
+      if (approval) {
         this.refreshSessionPhase(state, 'approval_detected');
         const signature = approvalPromptSignature(approval);
         if (signature && signature !== state.lastApprovalSignature) {
@@ -1631,7 +1637,7 @@ class RemoteSessionController {
             state,
             approval
           );
-          this.safeReplyPanel(state, panel, formatPermissionPanelText(panel));
+          this.presentApprovalPanel(state, panel, signature);
         }
         state.outputBuffer = '';
         return;
@@ -2019,7 +2025,13 @@ class RemoteSessionController {
     state.replyStream
       ?.[updateMethod](text)
       .catch((error) => {
-        this.logger.warn?.('Remote reply stream update failed:', error.message);
+        this.logger.warn?.('Remote reply stream update failed', remoteErrorLogMeta(error, {
+          pluginId: state.pluginId,
+          conversationId: state.conversationId,
+          sessionId: state.session?.id || '',
+          method: updateMethod,
+          final: Boolean(options.final)
+        }));
         if (
           state.pluginId !== 'feishu' &&
           options.final &&
@@ -2072,7 +2084,11 @@ class RemoteSessionController {
           this.notifyTurnFinished(state);
         })
         .catch((error) => {
-          this.logger.warn?.('Remote reply stream finish failed:', error.message);
+          this.logger.warn?.('Remote reply stream finish failed', remoteErrorLogMeta(error, {
+            pluginId: state.pluginId,
+            conversationId: state.conversationId,
+            sessionId: state.session?.id || ''
+          }));
           if (state.pluginId === 'feishu') {
             state.streamFinishedForTurn = true;
             state.turnStartedAt = 0;
@@ -2380,6 +2396,30 @@ class RemoteSessionController {
     } catch {
       return null;
     }
+  }
+
+  presentApprovalPanel(state, panel, signature) {
+    const fallbackText = formatPermissionPanelText(panel);
+    this.clearStreamHeartbeat(state);
+    if (typeof state.replyStream?.showPanel === 'function') {
+      Promise.resolve(state.replyStream.showPanel(panel)).catch((error) => {
+        if (state.lastApprovalSignature === signature) {
+          state.lastApprovalSignature = '';
+        }
+        this.logger.warn?.('Remote approval stream panel failed:', error.message);
+      });
+      return;
+    }
+    if (state.replyStream) {
+      Promise.resolve(state.replyStream.replace(fallbackText)).catch((error) => {
+        if (state.lastApprovalSignature === signature) {
+          state.lastApprovalSignature = '';
+        }
+        this.logger.warn?.('Remote approval stream update failed:', error.message);
+      });
+      return;
+    }
+    this.safeReplyPanel(state, panel, fallbackText);
   }
 
   async sendPermissionPanel(key, message, state, approval, options = {}) {
@@ -2953,6 +2993,9 @@ class RemoteSessionController {
     }
     if (state.dataListener) {
       state.session.off?.('data', state.dataListener);
+    }
+    if (state.snapshotListener) {
+      state.session.off?.('snapshot', state.snapshotListener);
     }
     if (state.exitListener) {
       state.session.off?.('exit', state.exitListener);
@@ -4969,6 +5012,20 @@ function appendRemoteFileWarnings(text, warnings) {
     '**文件未发送**',
     ...warnings.map((warning) => `- ${warning.name}: ${warning.reason}`)
   ].filter((line, index) => line || index > 0).join('\n');
+}
+
+function remoteErrorLogMeta(error, extra = {}) {
+  const meta = {
+    ...extra,
+    error: String(error?.message || error || 'Unknown error')
+  };
+  if (error?.code !== undefined && error?.code !== null && error?.code !== '') {
+    meta.code = error.code;
+  }
+  if (error?.httpStatus !== undefined && error?.httpStatus !== null) {
+    meta.httpStatus = error.httpStatus;
+  }
+  return meta;
 }
 
 function delay(ms) {

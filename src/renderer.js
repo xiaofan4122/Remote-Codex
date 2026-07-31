@@ -838,7 +838,7 @@ function renderFeishuConnectStatus(status = { status: 'idle' }) {
     feishuConnectQr.hidden = true;
     feishuConnectLink.textContent = '';
     feishuConnectUrl = '';
-    setSettingsStatus(status.pluginError ? status.message : t('feishuConnectedSaved'));
+    setSettingsStatus(status.message || t('feishuConnectedSaved'));
     return;
   }
 

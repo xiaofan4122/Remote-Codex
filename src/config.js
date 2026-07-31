@@ -332,8 +332,11 @@ function saveConfig(config, options = {}) {
   const configPath = options.configPath || config.configPath || getConfigPath();
   const payload = stripRuntimeFields(config);
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(`${configPath}.tmp`, `${JSON.stringify(payload, null, 2)}\n`);
+  fs.writeFileSync(`${configPath}.tmp`, `${JSON.stringify(payload, null, 2)}\n`, {
+    mode: 0o600
+  });
   fs.renameSync(`${configPath}.tmp`, configPath);
+  fs.chmodSync(configPath, 0o600);
   return loadConfig({ configPath });
 }
 

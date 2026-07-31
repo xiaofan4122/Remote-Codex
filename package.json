@@ -2,15 +2,39 @@
   "name": "remote-codex",
   "version": "0.1.0",
   "private": true,
-  "description": "Remote-friendly Codex CLI monitor and controller.",
+  "description": "Linux desktop and Feishu remote-control shell for the native Codex CLI.",
+  "desktopName": "Remote Codex",
+  "license": "MIT",
+  "author": "Remote Codex contributors",
+  "homepage": "https://github.com/xiaofan4122/Remote-Codex#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaofan4122/Remote-Codex.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xiaofan4122/Remote-Codex/issues"
+  },
+  "os": [
+    "linux"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.9"
+  },
   "main": "src/main.js",
   "scripts": {
     "start": "bash scripts/start-electron.sh",
     "api": "node src/api-server.js",
+    "test": "node scripts/run-test-suite.js",
+    "test:syntax": "node scripts/check-syntax.js",
+    "check": "npm test && npm run test:syntax",
     "capture:replay": "node scripts/replay-terminal-capture.js",
     "capture:export-fixture": "node scripts/export-terminal-capture-fixture.js",
     "smoke:native-slash": "node scripts/smoke-native-slash.js",
     "smoke:feishu-rich-text": "node scripts/smoke-feishu-rich-text.js",
+    "smoke:linux-artifact": "bash scripts/smoke-linux-release-artifact.sh",
     "test:native-slash-pages": "node scripts/test-native-slash-pages.js",
     "test:native-slash-commands": "node scripts/test-native-slash-commands.js",
     "test:permission-card-actions": "node scripts/test-permission-card-actions.js",
@@ -23,26 +47,34 @@
     "test:remote-file-delivery": "node scripts/test-remote-file-delivery.js",
     "test:latex-renderer": "node scripts/test-latex-renderer.js",
     "test:feishu-latex": "node scripts/test-feishu-latex.js",
+    "test:feishu-reconnect": "node scripts/test-feishu-reconnect.js",
     "test:settings-ui": "node scripts/test-settings-ui.js",
+    "test:shell-syntax": "node scripts/test-shell-syntax.js",
     "test:skill-install": "node scripts/test-skill-install.js",
     "test:codex-session-manager": "node scripts/test-codex-session-manager.js",
     "test:codex-rollout-reader": "node scripts/test-codex-rollout-reader.js",
+    "test:feishu-reply-stream": "node scripts/test-feishu-reply-stream.js",
     "test:feishu-remote-turn": "node scripts/test-feishu-remote-turn.js",
     "test:terminal-capture": "node scripts/test-terminal-capture.js",
+    "test:linux-installer": "node scripts/test-linux-installer.js",
+    "test:single-instance": "node scripts/test-single-instance-coordinator.js",
     "install:launchers": "bash scripts/install-launchers.sh",
-    "rebuild": "electron-rebuild -f -w node-pty"
+    "rebuild": "electron-builder install-app-deps",
+    "dist:linux": "electron-builder --linux tar.gz deb",
+    "dist:linux:x64": "electron-builder --linux tar.gz deb --x64",
+    "dist:linux:arm64": "electron-builder --linux tar.gz deb --arm64"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.65.0",
+    "@larksuiteoapi/node-sdk": "^1.72.0",
     "@resvg/resvg-wasm": "^2.6.2",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
-    "electron": "^30.5.1",
     "mathjax": "^4.1.3",
-    "node-pty": "^1.0.0",
+    "node-pty": "^1.1.0",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
-    "electron-rebuild": "^3.2.9"
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
   }
 }

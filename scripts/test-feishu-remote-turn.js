@@ -16,6 +16,7 @@ async function main() {
   await testFileUploadPermissionIsAppliedAndRetried();
   await testInvalidFinalFileDirectiveIsReportedOnOriginalCard();
   await testFileUploadFailureIsReportedOnOriginalCard();
+  await testApprovalSnapshotUpdatesOriginalCardImmediately();
   await testTerminalRepaintsCannotBecomeRemoteMessages();
   await testResumeGenerationCannotReplayPreviousTurn();
   await testCardKitStreamingUsesRolloutSegmentsAndFinalOnly();
@@ -421,6 +422,59 @@ async function testTerminalRepaintsCannotBecomeRemoteMessages() {
   cleanupHarness(harness);
 }
 
+async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
+  const harness = createHarness();
+  const prompt = '运行需要确认的命令';
+  await harness.plugin.handleReceiveMessage(
+    feishuMessage(prompt, 'om_approval_prompt')
+  );
+  await waitUntil(() => harness.cardCreates.length === 1);
+
+  const approvalSnapshot = [
+    `› ${prompt}`,
+    'Running shell command',
+    'Would you like to run the following command?',
+    'Reason: verify the release',
+    '$ npm test',
+    '> 1. Yes',
+    '  2. No'
+  ].join('\n');
+  harness.session.visualSnapshot = approvalSnapshot;
+  harness.session.visualViewportSnapshot = approvalSnapshot;
+  harness.session.emit('snapshot', { viewport: approvalSnapshot });
+
+  await waitUntil(() => harness.cardReplacements.length === 1);
+  const approvalCard = parseClosedStreamingCard(harness.cardReplacements[0]);
+  assert.equal(approvalCard.schema, '2.0');
+  assert.equal(approvalCard.header.template, 'orange');
+  assert.equal(approvalCard.header.subtitle.content, '等待确认');
+  assert.match(streamingCardMarkdown(approvalCard), /Would you like to run the following command\?/);
+  assert.match(streamingCardMarkdown(approvalCard), /npm test/);
+  assert.deepEqual(
+    approvalCard.body.elements
+      .find((element) => element.tag === 'action')
+      .actions.map((action) => action.value.remote_codex_action),
+    ['approve', 'approve_persistent', 'deny', 'up', 'down', 'enter']
+  );
+  assert.equal(harness.cardCreates.length, 1);
+  assert.equal(harness.cardMessages.length, 1);
+  assert.equal(harness.textFallbacks.length, 0);
+
+  await harness.plugin.handleCardAction(feishuApprovalAction('approve'));
+  await waitUntil(() => harness.cardReplacements.length === 2);
+  const submittedCard = parseClosedStreamingCard(harness.cardReplacements[1]);
+  assert.equal(submittedCard.header.template, 'blue');
+  assert.equal(
+    submittedCard.body.elements.some((element) => element.tag === 'action'),
+    false
+  );
+  assert.match(streamingCardMarkdown(submittedCard), /操作已提交/);
+  assert.equal(harness.session.writes.at(-1), 'y');
+  assert.equal(harness.cardCreates.length, 1);
+  assert.equal(harness.cardMessages.length, 1);
+  cleanupHarness(harness);
+}
+
 async function testResumeGenerationCannotReplayPreviousTurn() {
   const harness = createHarness();
   const firstPrompt = '第一轮任务';
@@ -543,6 +597,7 @@ function createHarness(options = {}) {
   const deliveryEvents = [];
   const updates = [];
   const closes = [];
+  const cardReplacements = [];
   const closeRequests = [];
   const textFallbacks = [];
   let finished = 0;
@@ -596,6 +651,7 @@ function createHarness(options = {}) {
     deliveryEvents,
     updates,
     closes,
+    cardReplacements,
     closeRequests,
     textFallbacks,
     singleCardOutput,
@@ -622,6 +678,7 @@ function createHarness(options = {}) {
     deliveryEvents,
     updates,
     closes,
+    cardReplacements,
     closeRequests,
     textFallbacks,
     parserTraces,
@@ -641,6 +698,7 @@ function createFakeFeishuPlugin({
   deliveryEvents,
   updates,
   closes,
+  cardReplacements,
   closeRequests,
   textFallbacks,
   singleCardOutput,
@@ -682,6 +740,11 @@ function createFakeFeishuPlugin({
       return {};
     }
     if (method === 'PUT' && /^\/cardkit\/v1\/cards\/[^/]+$/.test(requestPath)) {
+      const card = JSON.parse(body.card?.data || '{}');
+      if (card.config?.streaming_mode === true) {
+        cardReplacements.push({ path: requestPath, method, body });
+        return {};
+      }
       deliveryEvents.push('card_close');
       closeRequests.push({ path: requestPath, method, body });
       if (closeRequests.length <= failCloseAttempts) {
@@ -853,6 +916,25 @@ function feishuMessage(text, messageId = 'om_input') {
     },
     sender: {
       sender_id: {
+        open_id: 'ou_user'
+      }
+    }
+  };
+}
+
+function feishuApprovalAction(action) {
+  return {
+    action: {
+      value: {
+        remote_codex_action: action
+      }
+    },
+    context: {
+      open_chat_id: 'oc_chat',
+      open_message_id: 'om_stream'
+    },
+    operator: {
+      operator_id: {
         open_id: 'ou_user'
       }
     }
