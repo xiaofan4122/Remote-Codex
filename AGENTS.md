@@ -312,6 +312,26 @@ npm run smoke:feishu-rich-text
 git diff --check
 ```
 
+## Release CI Guardrails
+
+- Release changes must be reviewed against both real matrix architectures,
+  `x64` and `arm64`. Never hard-code x64 release IDs, archive names, checksum
+  names, download URLs, or fixture paths in matrix-executed tests.
+- Keep the naming boundary explicit: portable archives use `x64`/`arm64`, while
+  Debian packages use `amd64`/`arm64`. Assert the generated updater metadata for
+  the current matrix architecture.
+- Do not use developer conveniences such as `rg` inside runtime, installer,
+  release, or artifact-smoke shell scripts unless the workflow explicitly
+  installs and verifies them. The instruction to prefer `rg` applies to agent
+  repository searches, not to shipped automation.
+- Retry only proven infrastructure failures. Docker exit 125 may be retried once
+  because the container did not start; do not retry or hide build, test, audit,
+  packaging, or smoke-test failures.
+- Do not move a failed release tag. Increment the patch version in both package
+  manifests, create a new tag, wait for both build jobs plus the publish job,
+  and verify every expected Release asset. See `CONTRIBUTING.md` for the incident
+  table and complete release checklist.
+
 Also run targeted syntax checks for touched files, for example:
 
 ```bash
