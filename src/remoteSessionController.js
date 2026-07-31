@@ -1,3 +1,4 @@
+const crypto = require('node:crypto');
 const path = require('node:path');
 const {
   buildControlInput,
@@ -254,7 +255,18 @@ class RemoteSessionController {
     if (hasActiveRemoteTurn(state)) {
       const approval = this.getApprovalPrompt(state);
       if (approval) {
-        await this.sendPermissionPanel(key, message, state, approval);
+        const signature = approvalPromptSignature(approval);
+        if (signature && signature !== state.lastApprovalSignature) {
+          state.lastApprovalSignature = signature;
+          await this.sendPermissionPanel(key, message, state, approval);
+        } else {
+          this.logger.event?.('remote.approval.panel.ignored', {
+            pluginId: message.pluginId,
+            conversationId: message.conversationId,
+            sessionId: state.session?.id || '',
+            reason: 'already_presented'
+          });
+        }
         return;
       }
       if (state.nativeCommand) {
@@ -1528,6 +1540,30 @@ class RemoteSessionController {
       });
       return;
     }
+    if (
+      approvalAction &&
+      message.approvalContext &&
+      message.approvalContext !== approvalPromptContext(approval)
+    ) {
+      this.logger.event?.('remote.control.rejected_stale_approval', {
+        pluginId: message.pluginId,
+        conversationId: message.conversationId,
+        action
+      });
+      if (typeof message.replyPanel === 'function') {
+        await message.replyPanel({
+          kind: 'permission',
+          template: 'grey',
+          title: 'Remote Codex 权限确认',
+          attached: true,
+          active: false,
+          completed: false,
+          message: '该权限请求已失效。',
+          actions: []
+        });
+      }
+      return;
+    }
     if (this.isBufferedControlAction(state, action, approval)) {
       await message.reply('操作已收到，正在处理，请勿重复点击。');
       return;
@@ -2473,6 +2509,7 @@ class RemoteSessionController {
         ? 'Codex 正在等待权限确认。'
         : options.notice || '当前没有检测到权限确认弹窗。',
       progressText: active ? formatApprovalPrompt(approval) : '',
+      actionContext: active ? approvalPromptContext(approval) : '',
       actions: active
         ? this.buildPermissionPanelActions(approval)
         : ['tail', 'status']
@@ -4323,31 +4360,25 @@ function formatStatusPanelText(payload) {
 
 function formatPermissionPanelText(payload) {
   const lines = [];
+  if (payload.active && payload.approval) {
+    const reason = String(payload.approval.reason || '')
+      .replace(/^Reason:\s*/i, '')
+      .trim();
+    if (reason) lines.push(reason);
+    if (payload.approval.command) {
+      lines.push('', payload.approval.command);
+    }
+    if (lines.length === 0) {
+      lines.push(payload.approval.question || payload.message || '需要确认本次操作。');
+    }
+    lines.push('', '发送 /approve、/always 或 /deny。');
+    return lines.join('\n').trim();
+  }
+
   if (payload.notice) lines.push(payload.notice, '');
   if (!payload.notice || payload.message !== payload.notice) {
     lines.push(payload.message || '当前没有权限状态。');
   }
-
-  if (payload.active && payload.approval) {
-    if (payload.approval.status) lines.push(`状态: ${payload.approval.status}`);
-    if (payload.approval.question) lines.push(payload.approval.question);
-    if (payload.approval.reason) lines.push(payload.approval.reason);
-    if (payload.approval.command) {
-      lines.push('', payload.approval.command);
-    }
-    if (payload.approval.options?.length > 0) {
-      lines.push('', '选项:');
-      for (const option of payload.approval.options) {
-        const parsed = normalizeApprovalOption(option);
-        const prefix = parsed.selected ? '>' : '-';
-        const index = parsed.index ? `${parsed.index}. ` : '';
-        lines.push(`${prefix} ${index}${parsed.text}`.trimEnd());
-      }
-    }
-    lines.push('', '发送 /approve、/always 或 /deny 处理。');
-    return lines.join('\n').trim();
-  }
-
   if (payload.progressText) lines.push('', payload.progressText);
   lines.push('', '快捷命令: /resume /permission /status');
   return lines.join('\n').trim();
@@ -4653,11 +4684,22 @@ function approvalPromptSignature(prompt) {
     prompt.question || '',
     prompt.reason || '',
     prompt.command || '',
-    ...(prompt.options || []).map(formatApprovalOptionSignature)
+    ...(prompt.options || []).map(formatStableApprovalOptionSignature)
   ]
     .join('|')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function formatStableApprovalOptionSignature(option) {
+  const normalized = normalizeApprovalOption(option);
+  return `${normalized.index}:${normalized.text}`;
+}
+
+function approvalPromptContext(prompt) {
+  const signature = approvalPromptSignature(prompt);
+  if (!signature) return '';
+  return crypto.createHash('sha256').update(signature).digest('hex').slice(0, 24);
 }
 
 function normalizeNativeCodexSlashText(text) {

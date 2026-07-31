@@ -448,13 +448,25 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
   assert.equal(approvalCard.schema, '2.0');
   assert.equal(approvalCard.header.template, 'orange');
   assert.equal(approvalCard.header.subtitle.content, '等待确认');
-  assert.match(streamingCardMarkdown(approvalCard), /Would you like to run the following command\?/);
-  assert.match(streamingCardMarkdown(approvalCard), /npm test/);
+  const approvalMarkdown = streamingCardMarkdown(approvalCard);
+  const approvalActions = approvalCard.body.elements
+    .find((element) => element.tag === 'action')
+    .actions;
+  assert.match(approvalMarkdown, /verify the release/);
+  assert.match(approvalMarkdown, /npm test/);
+  assert.doesNotMatch(
+    approvalMarkdown,
+    /Would you like to run|选项|Yes|`\/approve`|Codex 正在等待/
+  );
   assert.deepEqual(
-    approvalCard.body.elements
-      .find((element) => element.tag === 'action')
-      .actions.map((action) => action.value.remote_codex_action),
+    approvalActions.map((action) => action.value.remote_codex_action),
     ['approve', 'approve_persistent', 'deny']
+  );
+  const approvalContext = approvalActions[0].value.remote_codex_context;
+  assert.match(approvalContext, /^[a-f0-9]{24}$/);
+  assert.deepEqual(
+    approvalActions.map((action) => action.value.remote_codex_context),
+    [approvalContext, approvalContext, approvalContext]
   );
   assert.equal(approvalCard.config.streaming_mode, false);
   assert.equal(harness.streamingModeUpdates.length, 1);
@@ -468,7 +480,30 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
   assert.equal(harness.cardMessages.length, 1);
   assert.equal(harness.textFallbacks.length, 0);
 
-  await harness.plugin.handleCardAction(feishuApprovalAction('approve'));
+  const selectionOnlyRepaint = approvalSnapshot
+    .replace('> 1. Yes', '  1. Yes')
+    .replace('  2. No', '> 2. No');
+  harness.session.visualSnapshot = selectionOnlyRepaint;
+  harness.session.visualViewportSnapshot = selectionOnlyRepaint;
+  harness.session.emit('snapshot', { viewport: selectionOnlyRepaint });
+  await wait(30);
+  assert.equal(
+    harness.cardReplacements.length,
+    1,
+    'changing only the native selection must not create another approval card'
+  );
+
+  await harness.plugin.handleReceiveMessage(
+    feishuMessage('审批期间的普通消息', 'om_during_approval')
+  );
+  await wait(30);
+  assert.equal(harness.cardCreates.length, 1);
+  assert.equal(harness.cardMessages.length, 1);
+  assert.equal(harness.cardReplacements.length, 1);
+
+  await harness.plugin.handleCardAction(
+    feishuApprovalAction('approve', approvalContext)
+  );
   await waitUntil(() => harness.cardReplacements.length === 2);
   const submittedCard = parseClosedStreamingCard(harness.cardReplacements[1]);
   assert.equal(submittedCard.header.template, 'blue');
@@ -942,11 +977,12 @@ function feishuMessage(text, messageId = 'om_input') {
   };
 }
 
-function feishuApprovalAction(action) {
+function feishuApprovalAction(action, context = '') {
   return {
     action: {
       value: {
-        remote_codex_action: action
+        remote_codex_action: action,
+        remote_codex_context: context
       }
     },
     context: {

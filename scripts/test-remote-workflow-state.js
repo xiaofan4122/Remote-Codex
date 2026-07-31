@@ -696,8 +696,10 @@ async function testApprovalPanelFailureFallsBackOnlyOnce() {
 
   assert.equal(panelAttempts.length, 1);
   assert.equal(fallbacks.length, 1);
-  assert.match(fallbacks[0], /等待权限确认/);
+  assert.match(fallbacks[0], /^verify/);
   assert.match(fallbacks[0], /npm test/);
+  assert.match(fallbacks[0], /发送 \/approve、\/always 或 \/deny/);
+  assert.doesNotMatch(fallbacks[0], /等待权限确认|Options:|Yes|No/);
   assert.doesNotMatch(fallbacks[0], /\/up|\/down|\/enter/);
 }
 

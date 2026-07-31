@@ -10,8 +10,9 @@ const feishuPlugin = require('../src/plugins/feishu');
 
 async function main() {
   testApprovalOptionSelection();
-  testFeishuPermissionPanelShowsOptionsAndControls();
+  testFeishuPermissionPanelIsCompact();
   await testRemoteControlInputBuffer();
+  await testStaleApprovalContextIsRejected();
   await testFeishuCardActionUpdatesAndDedupes();
   await testFeishuNativeActionCompletionPatchesOriginalCard();
   await testFeishuPermissionModeCardActionKeepsPageContext();
@@ -41,7 +42,7 @@ function testApprovalOptionSelection() {
   assert.match(second, /> 2\. Yes, always approve/);
 }
 
-function testFeishuPermissionPanelShowsOptionsAndControls() {
+function testFeishuPermissionPanelIsCompact() {
   const progressText = formatApprovalPrompt(
     extractApprovalPrompt(approvalLines(2).split('\n'))
   );
@@ -51,6 +52,9 @@ function testFeishuPermissionPanelShowsOptionsAndControls() {
     attached: true,
     active: true,
     approval: {
+      question: 'Would you like to run the following command?',
+      reason: 'Reason: Need to verify.',
+      command: 'npm run test:feishu-remote-turn',
       options: [
         { index: 1, text: 'Yes', selected: false },
         { index: 2, text: 'Yes, always approve', selected: true },
@@ -59,16 +63,23 @@ function testFeishuPermissionPanelShowsOptionsAndControls() {
     },
     message: 'Codex 正在等待权限确认。',
     progressText,
+    actionContext: 'approval-context',
     actions: ['approve', 'approve_persistent', 'deny']
   });
   const markdown = card.elements.find((element) => element.tag === 'markdown').content;
   const actions = card.elements.find((element) => element.tag === 'action').actions;
 
-  assert.match(markdown, /> 2\. Yes, always approve/);
-  assert.doesNotMatch(markdown, /上移\/下移会切换/);
+  assert.match(markdown, /Need to verify\./);
+  assert.match(markdown, /npm run test:feishu-remote-turn/);
+  assert.doesNotMatch(markdown, /Would you like to run/);
+  assert.doesNotMatch(markdown, /选项|Yes, always approve|`\/approve`/);
   assert.deepEqual(
     actions.map((action) => action.text.content),
     ['允许一次', '总是允许', '拒绝']
+  );
+  assert.deepEqual(
+    actions.map((action) => action.value.remote_codex_context),
+    ['approval-context', 'approval-context', 'approval-context']
   );
 
   const fallbackCard = feishuPlugin.__private.buildPanelCard({
@@ -77,6 +88,9 @@ function testFeishuPermissionPanelShowsOptionsAndControls() {
     attached: true,
     active: true,
     approval: {
+      question: 'Would you like to run the following command?',
+      reason: 'Reason: Need to verify.',
+      command: 'npm run test:feishu-remote-turn',
       options: [
         { index: 1, text: 'Yes', selected: false },
         { index: 2, text: 'Yes, always approve', selected: true },
@@ -89,8 +103,9 @@ function testFeishuPermissionPanelShowsOptionsAndControls() {
   const fallbackMarkdown = fallbackCard.elements.find(
     (element) => element.tag === 'markdown'
   ).content;
-  assert.match(fallbackMarkdown, /\*\*选项\*\*/);
-  assert.match(fallbackMarkdown, /> 2\. Yes, always approve/);
+  assert.match(fallbackMarkdown, /Need to verify\./);
+  assert.match(fallbackMarkdown, /npm run test:feishu-remote-turn/);
+  assert.doesNotMatch(fallbackMarkdown, /选项|Yes, always approve|Would you like to run/);
 }
 
 async function testRemoteControlInputBuffer() {
@@ -146,13 +161,67 @@ async function testRemoteControlInputBuffer() {
       ]
     }
   );
-  assert.match(replies.at(-1), /选项:/);
-  assert.match(replies.at(-1), /> 2\. Yes, always approve/);
+  assert.match(replies.at(-1), /Need to verify\./);
+  assert.match(replies.at(-1), /npm run test:feishu-remote-turn/);
+  assert.doesNotMatch(replies.at(-1), /选项:|Yes, always approve|Would you like to run/);
+}
+
+async function testStaleApprovalContextIsRejected() {
+  const controller = createController();
+  const key = 'feishu:stale-approval';
+  const writes = [];
+  const panels = [];
+  const state = {
+    key,
+    pluginId: 'feishu',
+    conversationId: 'stale-approval',
+    session: {
+      id: 's-stale',
+      visualSnapshot: approvalLines(1),
+      visualViewportSnapshot: approvalLines(1),
+      write(input) {
+        writes.push(input);
+      },
+      status() {
+        return { exited: false };
+      }
+    },
+    cursor: 0,
+    controlActionLocks: new Map()
+  };
+  controller.sessions.set(key, state);
+  const approval = extractApprovalPrompt(approvalLines(1).split('\n'));
+  const currentContext = controller.buildPermissionPanelPayload(
+    key,
+    null,
+    state,
+    approval
+  ).actionContext;
+  assert.match(currentContext, /^[a-f0-9]{24}$/);
+
+  const message = {
+    pluginId: 'feishu',
+    conversationId: 'stale-approval',
+    approvalContext: 'stale-context',
+    reply: async () => {},
+    replyPanel: async (panel) => panels.push(panel)
+  };
+  await controller.sendControlInput(key, message, 'approve');
+  assert.deepEqual(writes, []);
+  assert.equal(panels.length, 1);
+  assert.equal(panels[0].active, false);
+  assert.match(panels[0].message, /已失效/);
+
+  message.approvalContext = currentContext;
+  await controller.sendControlInput(key, message, 'approve');
+  assert.deepEqual(writes, ['y']);
 }
 
 async function testFeishuCardActionUpdatesAndDedupes() {
   let handleCount = 0;
   let patchCount = 0;
+  let deleteCount = 0;
+  const routedContexts = [];
   const plugin = feishuPlugin.create({
     config: {},
     pluginConfig: {
@@ -163,8 +232,9 @@ async function testFeishuCardActionUpdatesAndDedupes() {
     },
     services: {
       remoteController: {
-        async handleMessage() {
+        async handleMessage(message) {
           handleCount += 1;
+          routedContexts.push(message.approvalContext);
         }
       }
     },
@@ -180,7 +250,12 @@ async function testFeishuCardActionUpdatesAndDedupes() {
           async patch(payload) {
             patchCount += 1;
             const content = payload?.data?.content || '';
-            assert.match(content, /操作已提交/);
+            assert.match(content, /已提交/);
+            return { code: 0 };
+          },
+          async delete() {
+            deleteCount += 1;
+            return { code: 0 };
           }
         }
       }
@@ -189,7 +264,10 @@ async function testFeishuCardActionUpdatesAndDedupes() {
 
   const event = {
     action: {
-      value: { remote_codex_action: 'approve' }
+      value: {
+        remote_codex_action: 'approve',
+        remote_codex_context: 'approval-one'
+      }
     },
     context: {
       open_chat_id: 'oc_chat',
@@ -204,9 +282,20 @@ async function testFeishuCardActionUpdatesAndDedupes() {
 
   await plugin.handleCardAction(event);
   await plugin.handleCardAction(event);
+  await plugin.handleCardAction({
+    ...event,
+    action: {
+      value: {
+        remote_codex_action: 'approve',
+        remote_codex_context: 'approval-two'
+      }
+    }
+  });
 
-  assert.equal(handleCount, 1);
-  assert.equal(patchCount, 1);
+  assert.equal(handleCount, 2);
+  assert.equal(patchCount, 2);
+  assert.equal(deleteCount, 2);
+  assert.deepEqual(routedContexts, ['approval-one', 'approval-two']);
 }
 
 async function testFeishuNativeActionCompletionPatchesOriginalCard() {

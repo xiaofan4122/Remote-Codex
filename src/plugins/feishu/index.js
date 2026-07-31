@@ -500,7 +500,7 @@ class FeishuPlugin {
       page: action.page
     });
     const actionEventId = shouldDedupeCardAction(action.remoteAction) && action.messageId
-      ? `card:${action.messageId}:${action.operatorOpenId}:${action.remoteAction}`
+      ? `card:${action.messageId}:${action.operatorOpenId}:${action.remoteAction}:${action.context}`
       : '';
     if (this.isDuplicateEvent(actionEventId)) {
       this.logger.event?.('feishu.card.duplicate', {
@@ -542,6 +542,10 @@ class FeishuPlugin {
     }
 
     const command = `/${action.remoteAction}`;
+    const approvalAction = isApprovalCardAction(action.remoteAction);
+    const hasReplyStream = Boolean(
+      action.messageId && this.replyStreamsByMessageId.has(action.messageId)
+    );
     await this.updateActionCardFeedback(action);
     try {
       await this.services.remoteController.handleMessage({
@@ -549,6 +553,7 @@ class FeishuPlugin {
         conversationId: action.chatId || action.operatorOpenId,
         userId: action.operatorOpenId,
         pageContext: action.page,
+        approvalContext: action.context,
         text: command,
         reply: async (replyText) => {
           if (!action.chatId) return;
@@ -621,6 +626,9 @@ class FeishuPlugin {
           });
         }
       });
+      if (approvalAction && !hasReplyStream) {
+        await this.dismissStaticApprovalCard(action);
+      }
     } catch (error) {
       this.logger.warn?.('Feishu card action handling failed:', error.message);
       if (action.chatId) {
@@ -641,8 +649,11 @@ class FeishuPlugin {
       }
     }
 
+    const submitContext = isSubmitCardAction(action.remoteAction) && action.context
+      ? `:${action.context}`
+      : '';
     const scopeKey = action.messageId
-      ? `message:${action.messageId}`
+      ? `message:${action.messageId}${submitContext}`
       : `chat:${action.chatId}:${action.operatorOpenId}`;
     const submit = isSubmitCardAction(action.remoteAction);
     const submitKey = `${scopeKey}:submit`;
@@ -671,8 +682,9 @@ class FeishuPlugin {
   }
 
   releaseCardSubmitLock(action) {
+    const submitContext = action.context ? `:${action.context}` : '';
     const scopeKey = action.messageId
-      ? `message:${action.messageId}`
+      ? `message:${action.messageId}${submitContext}`
       : `chat:${action.chatId}:${action.operatorOpenId}`;
     this.cardActionLocks.delete(`${scopeKey}:submit`);
   }
@@ -753,10 +765,48 @@ class FeishuPlugin {
     if (!api?.patch) {
       throw new Error('The installed Feishu SDK does not expose im message patch API.');
     }
-    await api.patch({
+    const result = await api.patch({
       path: { message_id: messageId },
       data: { content: JSON.stringify(card) }
     });
+    if (result?.code) {
+      throw new Error(`Feishu card patch failed: ${result.code} ${result.msg || ''}`.trim());
+    }
+    this.logger.event?.('feishu.card.patched', { messageId });
+  }
+
+  async dismissStaticApprovalCard(action) {
+    if (!action.messageId || this.pluginConfig.mode === 'custom_webhook') return;
+    const client = this.client || new (requireLarkSdk().Client)({
+      appId: this.pluginConfig.appId,
+      appSecret: this.pluginConfig.appSecret
+    });
+    const api = client.im?.v1?.message || client.im?.message;
+    if (!api?.delete) {
+      this.logger.event?.('feishu.approval.card.dismiss.skipped', {
+        messageId: action.messageId,
+        reason: 'delete_api_unavailable'
+      });
+      return;
+    }
+    try {
+      const result = await api.delete({
+        path: { message_id: action.messageId }
+      });
+      if (result?.code) {
+        throw new Error(`Feishu card delete failed: ${result.code} ${result.msg || ''}`.trim());
+      }
+      this.logger.event?.('feishu.approval.card.dismissed', {
+        chatId: action.chatId,
+        messageId: action.messageId,
+        action: action.remoteAction
+      });
+    } catch (error) {
+      this.logger.warn?.('Feishu approval card dismiss failed', {
+        messageId: action.messageId,
+        error: String(error?.message || error || 'Unknown error')
+      });
+    }
   }
 
   getAuthorizationError(message) {
@@ -1531,6 +1581,11 @@ function normalizeCardAction(data) {
       data.open_id ||
       '',
     remoteAction,
+    context: String(
+      normalizedValue.remote_codex_context ||
+        normalizedValue.context ||
+        ''
+    ),
     page: String(
       normalizedValue.remote_codex_page ||
         normalizedValue.page ||
@@ -1627,6 +1682,12 @@ const REACTION_EMOJI_ALIASES = new Map([
 
 function shouldDedupeCardAction(action) {
   return ['approve', 'approve_persistent', 'deny', 'enter', 'escape'].includes(
+    String(action || '').toLowerCase()
+  );
+}
+
+function isApprovalCardAction(action) {
+  return ['approve', 'approve_persistent', 'deny'].includes(
     String(action || '').toLowerCase()
   );
 }

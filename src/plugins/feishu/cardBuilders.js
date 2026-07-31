@@ -81,12 +81,17 @@ function buildPanelCard(panel = {}) {
 function buildActionStateCard({ action, page = '', text, status } = {}) {
   const label = formatRemoteActionLabel(action);
   const feedback = formatActionFeedback(action, page);
-  const lines = [
-    `**${feedback.title}**`,
-    `- 操作: ${colorCardText(label, CARD_COLORS.approval)}`,
-    `- 状态: ${text || formatActionStateText(status, action, page)}`
-  ];
-  lines.push(`- ${feedback.detail}`);
+  const approvalAction = ['approve', 'approve_persistent', 'deny'].includes(
+    String(action || '').toLowerCase()
+  );
+  const lines = approvalAction
+    ? [text || formatActionStateText(status, action, page)]
+    : [
+        `**${feedback.title}**`,
+        `- 操作: ${colorCardText(label, CARD_COLORS.approval)}`,
+        `- 状态: ${text || formatActionStateText(status, action, page)}`,
+        `- ${feedback.detail}`
+      ];
 
   return {
     config: buildCardConfig({
@@ -95,7 +100,9 @@ function buildActionStateCard({ action, page = '', text, status } = {}) {
       enable_forward: true
     }),
     header: {
-      template: isSubmitCardAction(action) ? 'green' : 'blue',
+      template: approvalAction && String(action || '').toLowerCase() === 'deny'
+        ? 'grey'
+        : isSubmitCardAction(action) ? 'green' : 'blue',
       title: {
         tag: 'plain_text',
         content: 'Remote Codex'
@@ -179,50 +186,37 @@ function formatPanelPhase(phase) {
 }
 
 function buildPermissionPanelMarkdown(panel = {}) {
-  const lines = ['**权限**'];
-  if (panel.notice) {
-    lines.push(`- ${panel.notice}`);
-  }
+  const lines = [];
   if (!panel.attached) {
-    lines.push(`- ${panel.message || '当前没有接入会话。'}`);
+    lines.push(panel.message || '当前没有接入会话。');
     lines.push('- 发送 `/resume` 可接入当前可视化 Codex 会话。');
     return lines.join('\n');
   }
 
   if (panel.active) {
-    if (panel.progressText) {
-      lines.push('', panel.progressText);
-    } else {
-      lines.push(`- ${panel.message || 'Codex 正在等待权限确认。'}`);
-      const options = formatPanelApprovalOptions(panel.approval);
-      if (options.length > 0) {
-        lines.push('', '**选项**', ...options);
-      }
+    const approval = panel.approval || {};
+    const reason = String(approval.reason || '')
+      .replace(/^Reason:\s*/i, '')
+      .trim();
+    const command = clipForCard(String(approval.command || '').trim(), 1800)
+      .replace(/```/g, "'''");
+    if (reason) {
+      lines.push(reason);
     }
-    lines.push('', '可以点击下方按钮，或发送 `/approve`、`/always`、`/deny`。');
+    if (command) {
+      if (lines.length > 0) lines.push('');
+      lines.push('```bash', command, '```');
+    }
+    if (lines.length === 0) {
+      lines.push(
+        String(approval.question || panel.message || '需要确认本次操作。').trim()
+      );
+    }
     return lines.join('\n');
   }
 
-  lines.push(`- ${panel.message || '当前没有待处理的权限请求。'}`);
-  if (panel.progressText) lines.push('', panel.progressText);
-  lines.push('', '- `/status` 查看当前会话状态');
+  lines.push(panel.message || '当前没有待处理的权限请求。');
   return lines.join('\n');
-}
-
-function formatPanelApprovalOptions(approval) {
-  return (approval?.options || [])
-    .map((option) => {
-      if (option && typeof option === 'object') {
-        const prefix = option.selected ? '>' : '-';
-        const index = Number(option.index) ? `${Number(option.index)}. ` : '';
-        const text = String(option.text || '').trim();
-        return text ? `${prefix} ${index}${text}` : '';
-      }
-      const value = String(option || '').trim();
-      if (!value) return '';
-      return /^[->]\s/.test(value) ? value : `- ${value}`;
-    })
-    .filter(Boolean);
 }
 
 function buildNativeSlashPanelMarkdown(panel = {}) {
@@ -347,7 +341,8 @@ function buildPanelActionButton(action, panel = {}) {
   }[value];
   if (!option) return null;
   return buildControlButton(option[0], option[1], option[2], {
-    page: panel.kind === 'native_slash' ? panel.command : ''
+    page: panel.kind === 'native_slash' ? panel.command : '',
+    context: panel.actionContext || ''
   });
 }
 
@@ -584,6 +579,7 @@ function buildControlButtons(controlMode = 'default') {
 function buildControlButton(label, action, type, options = {}) {
   const value = { remote_codex_action: action };
   if (options.page) value.remote_codex_page = options.page;
+  if (options.context) value.remote_codex_context = options.context;
   return {
     tag: 'button',
     text: {
