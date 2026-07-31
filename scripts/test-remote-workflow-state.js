@@ -670,11 +670,15 @@ function testSessionPhases() {
 async function testApprovalPanelFailureFallsBackOnlyOnce() {
   const controller = createController();
   const panelAttempts = [];
-  const fallbacks = [];
+  const staticPanels = [];
+  const invalidStreamFallbacks = [];
   const state = createState({
     snapshot: approvalLines(),
     turnStartedAt: Date.now()
   });
+  state.replyPanel = async (panel) => {
+    staticPanels.push(panel);
+  };
   state.replyStream = {
     async showPanel(panel) {
       panelAttempts.push(panel);
@@ -684,7 +688,7 @@ async function testApprovalPanelFailureFallsBackOnlyOnce() {
       throw error;
     },
     async replace(text) {
-      fallbacks.push(text);
+      invalidStreamFallbacks.push(text);
     }
   };
   controller.sessions.set('feishu:chat', state);
@@ -695,12 +699,13 @@ async function testApprovalPanelFailureFallsBackOnlyOnce() {
   }
 
   assert.equal(panelAttempts.length, 1);
-  assert.equal(fallbacks.length, 1);
-  assert.match(fallbacks[0], /^verify/);
-  assert.match(fallbacks[0], /npm test/);
-  assert.match(fallbacks[0], /发送 \/approve、\/always 或 \/deny/);
-  assert.doesNotMatch(fallbacks[0], /等待权限确认|Options:|Yes|No/);
-  assert.doesNotMatch(fallbacks[0], /\/up|\/down|\/enter/);
+  assert.equal(invalidStreamFallbacks.length, 0);
+  assert.equal(staticPanels.length, 1);
+  assert.match(staticPanels[0].fallbackText, /^verify/);
+  assert.match(staticPanels[0].fallbackText, /npm test/);
+  assert.match(staticPanels[0].fallbackText, /发送 \/approve、\/always 或 \/deny/);
+  assert.doesNotMatch(staticPanels[0].fallbackText, /等待权限确认|Options:|Yes|No/);
+  assert.doesNotMatch(staticPanels[0].fallbackText, /\/up|\/down|\/enter/);
 }
 
 async function testResumeNavigationPatchesOriginalCard() {

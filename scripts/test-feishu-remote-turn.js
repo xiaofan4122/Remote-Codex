@@ -449,9 +449,7 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
   assert.equal(approvalCard.header.template, 'orange');
   assert.equal(approvalCard.header.subtitle.content, '等待确认');
   const approvalMarkdown = streamingCardMarkdown(approvalCard);
-  const approvalActions = approvalCard.body.elements
-    .find((element) => element.tag === 'action')
-    .actions;
+  const approvalActions = streamingCardButtons(approvalCard);
   assert.match(approvalMarkdown, /verify the release/);
   assert.match(approvalMarkdown, /npm test/);
   assert.doesNotMatch(
@@ -459,14 +457,19 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
     /Would you like to run|选项|Yes|`\/approve`|Codex 正在等待/
   );
   assert.deepEqual(
-    approvalActions.map((action) => action.value.remote_codex_action),
+    approvalActions.map((action) => buttonCallbackValue(action).remote_codex_action),
     ['approve', 'approve_persistent', 'deny']
   );
-  const approvalContext = approvalActions[0].value.remote_codex_context;
+  const approvalContext = buttonCallbackValue(approvalActions[0]).remote_codex_context;
   assert.match(approvalContext, /^[a-f0-9]{24}$/);
   assert.deepEqual(
-    approvalActions.map((action) => action.value.remote_codex_context),
+    approvalActions.map((action) => buttonCallbackValue(action).remote_codex_context),
     [approvalContext, approvalContext, approvalContext]
+  );
+  assert.equal(
+    approvalCard.body.elements.some((element) => element.tag === 'action'),
+    false,
+    'CardKit schema 2.0 must not contain the legacy action container'
   );
   assert.equal(approvalCard.config.streaming_mode, false);
   assert.equal(harness.streamingModeUpdates.length, 1);
@@ -1013,6 +1016,18 @@ function streamingCardMarkdown(card) {
   return normalizeSentMarkdown(
     String(card?.body?.elements?.find((element) => element.tag === 'markdown')?.content || '')
   );
+}
+
+function streamingCardButtons(card) {
+  return (card?.body?.elements || [])
+    .filter((element) => element?.tag === 'column_set')
+    .flatMap((element) => element.columns || [])
+    .flatMap((column) => column.elements || [])
+    .filter((element) => element?.tag === 'button');
+}
+
+function buttonCallbackValue(button) {
+  return button?.behaviors?.find((behavior) => behavior.type === 'callback')?.value || {};
 }
 
 function normalizeSentMarkdown(text) {

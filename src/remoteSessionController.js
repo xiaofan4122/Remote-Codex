@@ -256,9 +256,18 @@ class RemoteSessionController {
       const approval = this.getApprovalPrompt(state);
       if (approval) {
         const signature = approvalPromptSignature(approval);
-        if (signature && signature !== state.lastApprovalSignature) {
-          state.lastApprovalSignature = signature;
-          await this.sendPermissionPanel(key, message, state, approval);
+        if (
+          signature &&
+          signature !== state.lastApprovalSignature &&
+          !state.approvalPanelInFlight
+        ) {
+          const panel = this.buildPermissionPanelPayload(
+            key,
+            message,
+            state,
+            approval
+          );
+          await this.presentApprovalPanel(state, panel, signature, { force: true });
         } else {
           this.logger.event?.('remote.approval.panel.ignored', {
             pluginId: message.pluginId,
@@ -1220,6 +1229,9 @@ class RemoteSessionController {
       nativePanelUpdateRequested: false,
       controlActionLocks: new Map(),
       lastApprovalSignature: '',
+      lastApprovalAttemptSignature: '',
+      approvalPanelInFlight: false,
+      approvalPanelRetryAt: 0,
       lastInputText: '',
       nativeCommand: null,
       nativePageAction: null,
@@ -1665,8 +1677,15 @@ class RemoteSessionController {
       if (approval) {
         this.refreshSessionPhase(state, 'approval_detected');
         const signature = approvalPromptSignature(approval);
-        if (signature && signature !== state.lastApprovalSignature) {
-          state.lastApprovalSignature = signature;
+        if (
+          signature &&
+          signature !== state.lastApprovalSignature &&
+          !state.approvalPanelInFlight &&
+          (
+            signature !== state.lastApprovalAttemptSignature ||
+            Date.now() >= Number(state.approvalPanelRetryAt || 0)
+          )
+        ) {
           const panel = this.buildPermissionPanelPayload(
             state.key,
             null,
@@ -2323,14 +2342,17 @@ class RemoteSessionController {
           state.lastSentReplyText = text;
           state.lastSentReplySignature = remoteMessageSignature(text);
         }
-        return;
+        return true;
       }
 
       if (text) {
-        await this.safeReply(state, text);
+        await state.reply(text);
+        return true;
       }
+      return false;
     } catch (error) {
       this.logger.warn?.('Remote panel reply failed:', error.message);
+      return false;
     }
   }
 
@@ -2434,40 +2456,52 @@ class RemoteSessionController {
     }
   }
 
-  presentApprovalPanel(state, panel, signature) {
+  async presentApprovalPanel(state, panel, signature, options = {}) {
+    if (!signature || signature === state.lastApprovalSignature) return true;
+    if (state.approvalPanelInFlight) return false;
+    if (
+      !options.force &&
+      signature === state.lastApprovalAttemptSignature &&
+      Date.now() < Number(state.approvalPanelRetryAt || 0)
+    ) {
+      return false;
+    }
+
     const fallbackText = formatPermissionPanelText(panel);
     this.clearStreamHeartbeat(state);
-    if (typeof state.replyStream?.showPanel === 'function') {
-      Promise.resolve(state.replyStream.showPanel(panel)).catch((error) => {
-        this.logger.warn?.('Remote approval stream panel failed', {
-          error: String(error?.message || error || 'Unknown error'),
-          code: error?.code || null,
-          httpStatus: error?.httpStatus || null,
-          signature
-        });
-        Promise.resolve(state.replyStream?.replace?.(fallbackText)).catch((fallbackError) => {
-          this.logger.warn?.('Remote approval text fallback failed', {
-            error: String(fallbackError?.message || fallbackError || 'Unknown error'),
-            code: fallbackError?.code || null,
-            httpStatus: fallbackError?.httpStatus || null,
+    state.approvalPanelInFlight = true;
+    state.lastApprovalAttemptSignature = signature;
+    let presented = false;
+    try {
+      if (state.replyStreamStarting && state.replyStreamReadyPromise) {
+        await state.replyStreamReadyPromise;
+      }
+      if (typeof state.replyStream?.showPanel === 'function') {
+        try {
+          await state.replyStream.showPanel(panel);
+          presented = true;
+        } catch (error) {
+          this.logger.warn?.('Remote approval stream panel failed', {
+            error: String(error?.message || error || 'Unknown error'),
+            code: error?.code || null,
+            httpStatus: error?.httpStatus || null,
             signature
           });
-        });
-      });
-      return;
+        }
+      }
+      if (!presented) {
+        presented = await this.safeReplyPanel(state, panel, fallbackText);
+      }
+      if (presented) {
+        state.lastApprovalSignature = signature;
+        state.approvalPanelRetryAt = 0;
+      } else {
+        state.approvalPanelRetryAt = Date.now() + 1000;
+      }
+      return presented;
+    } finally {
+      state.approvalPanelInFlight = false;
     }
-    if (state.replyStream) {
-      Promise.resolve(state.replyStream.replace(fallbackText)).catch((error) => {
-        this.logger.warn?.('Remote approval stream update failed', {
-          error: String(error?.message || error || 'Unknown error'),
-          code: error?.code || null,
-          httpStatus: error?.httpStatus || null,
-          signature
-        });
-      });
-      return;
-    }
-    this.safeReplyPanel(state, panel, fallbackText);
   }
 
   async sendPermissionPanel(key, message, state, approval, options = {}) {
@@ -2990,6 +3024,9 @@ class RemoteSessionController {
     state.sentSegmentSignatures = new Set();
     state.nativePanelUpdateRequested = false;
     state.lastApprovalSignature = '';
+    state.lastApprovalAttemptSignature = '';
+    state.approvalPanelInFlight = false;
+    state.approvalPanelRetryAt = 0;
     state.nativeCommand = null;
     state.nativePageAction = null;
     state.nativeTaskRolloutPending = false;

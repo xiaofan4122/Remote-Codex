@@ -438,14 +438,14 @@ function testFeishuResumeButtons() {
     initialText: '**/resume 会话列表**',
     controlMode: 'resume'
   });
-  const actions = card.body.elements.find((element) => element.tag === 'action').actions;
+  const actions = streamingCardButtons(card);
   const labels = actions.map((action) => action.text.content);
-  const values = actions.map((action) => action.value.remote_codex_action);
+  const values = actions.map((action) => buttonCallbackValue(action).remote_codex_action);
 
   assert.deepEqual(labels, ['上移', '下移', '恢复', '退出']);
   assert.deepEqual(values, ['up', 'down', 'enter', 'escape']);
   assert.deepEqual(
-    actions.map((action) => action.value.remote_codex_page),
+    actions.map((action) => buttonCallbackValue(action).remote_codex_page),
     ['/resume', '/resume', '/resume', '/resume']
   );
   assert.equal(card.header.template, 'blue');
@@ -457,18 +457,18 @@ function testFeishuPermissionsButtons() {
     initialText: '**权限选项**',
     controlMode: 'permissions'
   });
-  const actions = card.body.elements.find((element) => element.tag === 'action').actions;
+  const actions = streamingCardButtons(card);
 
   assert.deepEqual(
     actions.map((action) => action.text.content),
     ['Ask for approval', 'Approve for me', 'Full Access']
   );
   assert.deepEqual(
-    actions.map((action) => action.value.remote_codex_page),
+    actions.map((action) => buttonCallbackValue(action).remote_codex_page),
     ['/permissions', '/permissions', '/permissions']
   );
   assert.deepEqual(
-    actions.map((action) => action.value.remote_codex_action),
+    actions.map((action) => buttonCallbackValue(action).remote_codex_action),
     ['permission_default', 'permission_auto_review', 'permission_full_access']
   );
 }
@@ -710,6 +710,18 @@ function createController() {
       plugins: {}
     }
   });
+}
+
+function streamingCardButtons(card) {
+  return (card?.body?.elements || [])
+    .filter((element) => element?.tag === 'column_set')
+    .flatMap((element) => element.columns || [])
+    .flatMap((column) => column.elements || [])
+    .filter((element) => element?.tag === 'button');
+}
+
+function buttonCallbackValue(button) {
+  return button?.behaviors?.find((behavior) => behavior.type === 'callback')?.value || {};
 }
 
 function wait(ms) {

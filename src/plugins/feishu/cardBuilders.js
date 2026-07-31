@@ -369,10 +369,7 @@ function buildStreamingCard({ title, initialText, controlMode = 'default' }) {
     }
   ];
   if (actions.length > 0) {
-    elements.push({
-      tag: 'action',
-      actions
-    });
+    elements.push(buildV2ButtonColumns(actions, 'stream_control'));
   }
 
   return {
@@ -412,10 +409,7 @@ function buildStreamingPanelCard(panel = {}) {
     }
   ];
   if (actions.length > 0) {
-    elements.push({
-      tag: 'action',
-      actions
-    });
+    elements.push(buildV2ButtonColumns(actions, 'panel_action'));
   }
 
   return {
@@ -588,6 +582,40 @@ function buildControlButton(label, action, type, options = {}) {
     },
     type,
     value,
+    behaviors: [
+      {
+        type: 'callback',
+        value
+      }
+    ]
+  };
+}
+
+function buildV2ButtonColumns(actions, idPrefix) {
+  return {
+    tag: 'column_set',
+    flex_mode: 'none',
+    background_style: 'default',
+    horizontal_spacing: 'small',
+    margin: '8px 0 0 0',
+    columns: actions.map((action, index) => ({
+      tag: 'column',
+      width: 'auto',
+      vertical_align: 'top',
+      elements: [buildV2Button(action, `${idPrefix}_${index + 1}`)]
+    }))
+  };
+}
+
+function buildV2Button(action, elementId) {
+  const value = action?.value && typeof action.value === 'object'
+    ? action.value
+    : {};
+  return {
+    tag: 'button',
+    element_id: elementId.slice(0, 20),
+    text: action.text,
+    type: action.type || 'default',
     behaviors: [
       {
         type: 'callback',
