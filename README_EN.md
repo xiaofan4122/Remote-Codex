@@ -12,7 +12,7 @@ Remote Codex is a Linux desktop and Feishu remote-control shell for the native
 Codex CLI.
 
 > **Linux only.** Supported release architectures are `x86_64` and `arm64`.
-> Install and sign in to the native `codex` command before using Remote Codex.
+> [Install the native Codex CLI](https://learn.chatgpt.com/docs/codex/cli#getting-started) and sign in before using Remote Codex.
 
 ## Why Remote Codex?
 

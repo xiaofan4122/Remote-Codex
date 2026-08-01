@@ -11,7 +11,7 @@
 Remote Codex 是原生 Codex CLI 的 Linux 桌面外壳，同时支持通过飞书远程操控。
 
 > **仅支持 Linux。** 发行版支持 `x86_64` 和 `arm64` 架构。
-> 使用 Remote Codex 前，请先安装原生 `codex` 命令并完成登录。
+> 使用 Remote Codex 前，请先[安装原生 Codex CLI](https://learn.chatgpt.com/docs/codex/cli#getting-started)并完成登录。
 
 ## 为什么选择 Remote Codex？
 
