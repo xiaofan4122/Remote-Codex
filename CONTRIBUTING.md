@@ -40,6 +40,38 @@ dependencies.
 Read `AGENTS.md` and `ARCHITECTURE.md` before changing the rollout, PTY, remote
 controller, or Feishu boundaries.
 
+## Release installation policy
+
+Ubuntu and Debian users are the primary packaged-install audience. User-facing
+documentation and release notes should lead with the `.deb` packages, using
+these stable architecture names:
+
+| Host architecture | Debian asset | Portable asset |
+| --- | --- | --- |
+| `x86_64` | `remote-codex-linux-amd64.deb` | `remote-codex-linux-x64.tar.gz` |
+| `arm64` | `remote-codex-linux-arm64.deb` | `remote-codex-linux-arm64.tar.gz` |
+
+Keep the portable archive and `install.sh` as supported alternatives for
+non-Debian systems and installations without `sudo`. Do not make a
+`curl ... | bash` pipeline the primary or only documented installation path.
+When documenting the script, download the release-published `install.sh` to a
+file before running it so an interrupted script transfer cannot feed partial
+content directly to Bash.
+
+Every release-facing change must preserve these acceptance points:
+
+- The latest-release URLs in `README.md` resolve to both `.deb` files and their
+  matching `.sha256` files.
+- `sha256sum --check` succeeds before installation instructions invoke APT.
+- `sudo apt install ./remote-codex-linux-<deb-arch>.deb` installs dependencies,
+  the desktop entry, and the `remote-codex` command.
+- The user-local installer verifies the complete portable archive before its
+  atomic `current` symlink switch; a failed download must leave the active
+  release unchanged.
+- Renaming an asset requires coordinated updates to `electron-builder.yml`,
+  updater metadata, release CI, checksum generation, smoke tests, and
+  user-facing documentation.
+
 ## Release CI checklist
 
 Release CI builds on two real runner architectures. A green x64 build does not
@@ -67,7 +99,8 @@ of these rules:
 - Consider a release complete only after both architecture jobs and the publish
   job succeed, and the Release contains both archives, both `.deb` files, their
   checksums, both `latest-linux*.yml` files, `remote-codex-version.txt`, and
-  `install.sh`.
+  `install.sh`. Open the published Release as an unauthenticated user and check
+  the README's latest-release package links before announcing it.
 
 ### Previous failures and the rule they established
 

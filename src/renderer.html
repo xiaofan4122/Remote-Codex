@@ -47,6 +47,13 @@
       <aside id="terminalScrollbar" aria-label="终端滚动历史">
         <div id="terminalScrollSpacer"></div>
       </aside>
+      <div
+        id="terminalDropOverlay"
+        class="terminal-drop-overlay"
+        aria-hidden="true"
+      >
+        <span data-i18n="dropFilesHere">松开以将文件路径添加到 Codex 输入框</span>
+      </div>
     </main>
 
     <aside id="settingsPanel" class="settings-panel" aria-hidden="true">
@@ -137,6 +144,8 @@
 
     <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
     <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+    <script src="./terminalKeyInput.js"></script>
+    <script src="./terminalFileDrop.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>

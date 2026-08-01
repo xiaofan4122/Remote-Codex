@@ -11,11 +11,17 @@ APP_COMMAND="${BIN_DIR}/remote-codex"
 DEV_COMMAND="${BIN_DIR}/remote-codex-dev"
 API_COMMAND="${BIN_DIR}/remote-codex-api"
 DESKTOP_FILE="${DESKTOP_DIR}/remote-codex.desktop"
+ICON_FILE="${APP_DIR}/build/icons/512x512.png"
 LEGACY_APP_COMMAND="${BIN_DIR}/codex-shell"
 LEGACY_API_COMMAND="${BIN_DIR}/codex-shell-api"
 LEGACY_DESKTOP_FILE="${DESKTOP_DIR}/codex-shell.desktop"
 
 mkdir -p "${BIN_DIR}" "${DESKTOP_DIR}"
+
+if [ ! -f "${ICON_FILE}" ]; then
+  echo "Remote Codex icon is missing: ${ICON_FILE}" >&2
+  exit 1
+fi
 
 install_remote_codex_skill() {
   if [ ! -f "${SKILL_SOURCE_DIR}/SKILL.md" ] || [ ! -f "${SKILL_SOURCE_DIR}/agents/openai.yaml" ]; then
@@ -124,7 +130,7 @@ Type=Application
 Name=Remote Codex
 Comment=Run Codex CLI in a desktop window
 Exec=${APP_COMMAND}
-Icon=utilities-terminal
+Icon=${ICON_FILE}
 Terminal=false
 Categories=Development;
 StartupNotify=true
@@ -190,6 +196,7 @@ echo "  ${APP_COMMAND}"
 echo "  ${DEV_COMMAND}"
 echo "  ${API_COMMAND}"
 echo "  ${DESKTOP_FILE}"
+echo "  ${ICON_FILE}"
 echo "  ${SKILL_DIR}"
 echo
 echo "Open the app with:"

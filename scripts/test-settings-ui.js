@@ -29,9 +29,37 @@ for (const id of ['automaticUpdatesEnabled', 'updateStatus', 'updateAction']) {
 assert.match(preload, /checkForUpdates:.*updates:check/);
 assert.match(preload, /downloadUpdate:.*updates:download/);
 assert.match(preload, /installUpdate:.*updates:install/);
+assert.match(preload, /setUiLanguage:.*ui:set-language/);
+assert.match(preload, /resetFeishuConnection:.*feishu:connection-reset/);
 assert.match(main, /ipcMain\.handle\('updates:check'/);
 assert.match(main, /ipcMain\.handle\('updates:download'/);
 assert.match(main, /ipcMain\.handle\('updates:install'/);
+const languageHandler = main.slice(
+  main.indexOf("ipcMain.handle('ui:set-language'"),
+  main.indexOf("ipcMain.handle('ui:onboarding-complete'")
+);
+assert.match(languageHandler, /saveConfigPatch/);
+assert.doesNotMatch(
+  languageHandler,
+  /restartPlugins/,
+  'changing the UI language must not restart Codex plugins'
+);
+assert.match(renderer, /queueLanguageSave\(language\)/);
+assert.match(renderer, /await waitForPendingLanguageSave\(\)/);
+assert.match(renderer, /resetFeishu: '重置飞书链接'/);
+assert.match(renderer, /hasConfiguredFeishuConnection\(currentConfig\)/);
+assert.match(renderer, /window\.codexShell\.resetFeishuConnection\(\)/);
+assert.match(styles, /button\.danger-text-button\s*\{[^}]*color:\s*#f87171;/s);
+
+const feishuResetHandler = main.slice(
+  main.indexOf("ipcMain.handle('feishu:connection-reset'"),
+  main.indexOf("ipcMain.handle('feishu:connect-cancel'")
+);
+assert.match(feishuResetHandler, /dialog\.showMessageBox/);
+assert.match(feishuResetHandler, /type:\s*'warning'/);
+assert.match(feishuResetHandler, /resetFeishuConnection\(/);
+assert.match(main, /是否删除原本链接并重新配置？/);
+assert.match(main, /飞书应用需要在应用管理后台自行删除。/);
 
 for (const id of [
   'onboardingWelcome',
@@ -122,6 +150,8 @@ assert.equal(normalizeConfig({
   updates: { automaticEnabled: false }
 }, '/tmp/remote-codex-settings-test.json').updates.automaticEnabled, false);
 
+testLanguagePersistence();
+
 testFirstRunOnboardingPersistence();
 
 console.log('Settings UI tests passed.');
@@ -154,6 +184,23 @@ function testFirstRunOnboardingPersistence() {
     const existingUser = loadConfig({ configPath });
     assert.equal(existingUser.ui.firstRun, false);
     assert.equal(existingUser.ui.onboardingCompleted, false);
+  } finally {
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+function testLanguagePersistence() {
+  const fixtureRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'remote-codex-settings-language-')
+  );
+  const configPath = path.join(fixtureRoot, 'config.json');
+  try {
+    const saved = saveConfigPatch({
+      ui: { language: 'en' }
+    }, { configPath });
+    assert.equal(saved.ui.language, 'en');
+    assert.equal(loadConfig({ configPath }).ui.language, 'en');
+    assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).ui.language, 'en');
   } finally {
     fs.rmSync(fixtureRoot, { recursive: true, force: true });
   }

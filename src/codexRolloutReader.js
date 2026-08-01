@@ -692,15 +692,10 @@ function extractEscalatedExecRequests(input) {
 
 function extractStaticStringArrayProperty(source, name) {
   const value = String(source || '');
-  const masked = maskJavaScriptNonCode(value);
-  const pattern = new RegExp(`\\b${escapeRegExp(name)}\\s*:`, 'g');
-  const depths = objectDepths(masked);
-  let match;
-  while ((match = pattern.exec(masked))) {
-    if (depths[match.index] !== 1) continue;
-    let cursor = match.index + match[0].length;
-    while (/\s/.test(value[cursor] || '')) cursor += 1;
-    const parsed = readStaticStringArray(value, cursor);
+  for (const valueStart of findStaticPropertyValueStarts(value, name, {
+    topLevelObject: true
+  })) {
+    const parsed = readStaticStringArray(value, valueStart);
     if (parsed) return parsed.values;
   }
   return [];
@@ -810,30 +805,100 @@ function extractStaticStringProperty(source, name) {
 
 function extractStaticStringProperties(source, name, options = {}) {
   const value = String(source || '');
-  const masked = maskJavaScriptNonCode(value);
-  const pattern = new RegExp(`\\b${escapeRegExp(name)}\\s*:`, 'g');
-  const depths = options.topLevelObject ? objectDepths(masked) : null;
   const values = [];
-  let match;
-  while ((match = pattern.exec(masked))) {
-    if (depths && depths[match.index] !== 1) continue;
-    let cursor = match.index + match[0].length;
-    while (/\s/.test(value[cursor] || '')) cursor += 1;
-    const parsed = readJavaScriptStringLiteral(value, cursor);
+  for (const valueStart of findStaticPropertyValueStarts(value, name, options)) {
+    const parsed = readJavaScriptStringLiteral(value, valueStart);
     if (parsed) values.push(parsed.value);
   }
   return values;
 }
 
-function objectDepths(masked) {
-  const depths = new Uint16Array(masked.length);
-  let depth = 0;
-  for (let index = 0; index < masked.length; index += 1) {
-    depths[index] = depth;
-    if (masked[index] === '{') depth += 1;
-    if (masked[index] === '}') depth = Math.max(0, depth - 1);
+function findStaticPropertyValueStarts(source, name, options = {}) {
+  const value = String(source || '');
+  const expectedDepth = options.topLevelObject ? 1 : null;
+  const starts = [];
+  let objectDepth = 0;
+  let index = 0;
+
+  while (index < value.length) {
+    const char = value[index];
+    const next = value[index + 1];
+
+    if (char === '/' && next === '/') {
+      const newline = value.indexOf('\n', index + 2);
+      index = newline < 0 ? value.length : newline + 1;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      const end = value.indexOf('*/', index + 2);
+      index = end < 0 ? value.length : end + 2;
+      continue;
+    }
+    if (char === '{') {
+      objectDepth += 1;
+      index += 1;
+      continue;
+    }
+    if (char === '}') {
+      objectDepth = Math.max(0, objectDepth - 1);
+      index += 1;
+      continue;
+    }
+
+    if (['"', "'", '`'].includes(char)) {
+      const parsed = readJavaScriptStringLiteral(value, index);
+      const end = parsed?.end || skipQuotedLiteral(value, index);
+      if (
+        parsed?.value === name &&
+        (expectedDepth === null || objectDepth === expectedDepth)
+      ) {
+        const valueStart = propertyValueStart(value, end);
+        if (valueStart >= 0) starts.push(valueStart);
+      }
+      index = Math.max(index + 1, end);
+      continue;
+    }
+
+    if (/[A-Za-z_$]/.test(char)) {
+      let end = index + 1;
+      while (/[A-Za-z0-9_$]/.test(value[end] || '')) end += 1;
+      if (
+        value.slice(index, end) === name &&
+        (expectedDepth === null || objectDepth === expectedDepth)
+      ) {
+        const valueStart = propertyValueStart(value, end);
+        if (valueStart >= 0) starts.push(valueStart);
+      }
+      index = end;
+      continue;
+    }
+
+    index += 1;
   }
-  return depths;
+  return starts;
+}
+
+function propertyValueStart(source, keyEnd) {
+  let cursor = keyEnd;
+  while (/\s/.test(source[cursor] || '')) cursor += 1;
+  if (source[cursor] !== ':') return -1;
+  cursor += 1;
+  while (/\s/.test(source[cursor] || '')) cursor += 1;
+  return cursor;
+}
+
+function skipQuotedLiteral(source, start) {
+  const quote = source[start];
+  let index = start + 1;
+  while (index < source.length) {
+    if (source[index] === '\\') {
+      index += 2;
+      continue;
+    }
+    if (source[index] === quote) return index + 1;
+    index += 1;
+  }
+  return source.length;
 }
 
 function readJavaScriptStringLiteral(source, start) {
@@ -972,10 +1037,6 @@ function dedupeEscalatedRequests(requests) {
 
 function uniqueNonEmpty(values) {
   return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
-}
-
-function escapeRegExp(value) {
-  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function normalizeStartedAt(value) {

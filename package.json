@@ -56,6 +56,7 @@
     "test:feishu-reply-stream": "node scripts/test-feishu-reply-stream.js",
     "test:feishu-remote-turn": "node scripts/test-feishu-remote-turn.js",
     "test:terminal-capture": "node scripts/test-terminal-capture.js",
+    "test:terminal-key-input": "node scripts/test-terminal-key-input.js",
     "test:linux-installer": "node scripts/test-linux-installer.js",
     "test:app-updates": "node scripts/test-app-updates.js",
     "test:single-instance": "node scripts/test-single-instance-coordinator.js",

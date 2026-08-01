@@ -1,4 +1,6 @@
 const terminalElement = document.getElementById('terminal');
+const terminalShell = document.getElementById('terminalShell');
+const terminalDropOverlay = document.getElementById('terminalDropOverlay');
 const terminalScrollbar = document.getElementById('terminalScrollbar');
 const terminalScrollSpacer = document.getElementById('terminalScrollSpacer');
 const cwdElement = document.getElementById('cwd');
@@ -28,6 +30,14 @@ const feishuOnboardingGuide = document.getElementById('feishuOnboardingGuide');
 const tryFeishuFromOnboardingButton = document.getElementById('tryFeishuFromOnboarding');
 const dismissOnboardingConnectButton = document.getElementById('dismissOnboardingConnect');
 const settingsStatus = document.getElementById('settingsStatus');
+const {
+  isImeSwitchKeyEvent,
+  shouldBypassTerminalKeyEvent
+} = window.RemoteCodexTerminalKeyInput;
+const {
+  buildDroppedFilePaste,
+  dataTransferHasFiles
+} = window.RemoteCodexTerminalFileDrop;
 
 let currentCwd = null;
 let currentConfig = null;
@@ -43,6 +53,9 @@ let scrollbarSyncing = false;
 let onboardingInitialized = false;
 let onboardingStage = 'inactive';
 let onboardingCompleting = false;
+let terminalCompositionActive = false;
+let terminalFileDragDepth = 0;
+let languageSavePromise = Promise.resolve(null);
 const TERMINAL_MIN_COLS = 2;
 const TERMINAL_MIN_ROWS = 1;
 
@@ -58,6 +71,7 @@ const I18N = {
     languageChinese: '中文',
     languageEnglish: 'English',
     terminalScrollback: '终端滚动历史',
+    dropFilesHere: '松开以将文件路径添加到 Codex 输入框',
     softwareUpdates: '软件更新',
     automaticUpdatesEnabled: '自动检查并下载更新',
     automaticUpdatesHelp: '下载完成后将在退出时安装，也可以立即安装并重启。',
@@ -81,7 +95,7 @@ const I18N = {
     connection: '连接',
     notConnected: '未连接。',
     connectFeishu: '连接飞书',
-    reconnectFeishu: '重新连接飞书',
+    resetFeishu: '重置飞书链接',
     openLink: '打开链接',
     cancel: '取消',
     save: '保存',
@@ -89,10 +103,12 @@ const I18N = {
     settingsLoaded: '设置已加载。',
     savingSettings: '正在保存设置...',
     settingsSaved: '设置已保存。',
+    languageSaveFailed: '语言设置保存失败：{error}',
     savedPluginError: '已保存。插件错误：{error}',
     couldNotOpenFeishuLink: '无法打开飞书链接。',
     preparingFeishuAuthorization: '正在准备飞书授权...',
     failedStartFeishuAuthorization: '启动飞书授权失败。',
+    failedResetFeishuConnection: '重置飞书链接失败。',
     failedCancelFeishuAuthorization: '取消飞书授权失败。',
     configured: '已配置：{value}',
     connected: '已连接：{value}',
@@ -127,6 +143,7 @@ const I18N = {
     languageChinese: '中文',
     languageEnglish: 'English',
     terminalScrollback: 'Terminal scrollback',
+    dropFilesHere: 'Drop to add file paths to the Codex prompt',
     softwareUpdates: 'Software Updates',
     automaticUpdatesEnabled: 'Automatically check for and download updates',
     automaticUpdatesHelp: 'Downloaded updates install when the app exits, or you can install and restart now.',
@@ -150,7 +167,7 @@ const I18N = {
     connection: 'Connection',
     notConnected: 'Not connected.',
     connectFeishu: 'Connect Feishu',
-    reconnectFeishu: 'Reconnect Feishu',
+    resetFeishu: 'Reset Feishu Connection',
     openLink: 'Open Link',
     cancel: 'Cancel',
     save: 'Save',
@@ -158,10 +175,12 @@ const I18N = {
     settingsLoaded: 'Settings loaded.',
     savingSettings: 'Saving settings...',
     settingsSaved: 'Settings saved.',
+    languageSaveFailed: 'Failed to save language setting: {error}',
     savedPluginError: 'Saved. Plugin error: {error}',
     couldNotOpenFeishuLink: 'Could not open Feishu link.',
     preparingFeishuAuthorization: 'Preparing Feishu authorization...',
     failedStartFeishuAuthorization: 'Failed to start Feishu authorization.',
+    failedResetFeishuConnection: 'Failed to reset the Feishu connection.',
     failedCancelFeishuAuthorization: 'Failed to cancel Feishu authorization.',
     configured: 'Configured: {value}',
     connected: 'Connected: {value}',
@@ -224,15 +243,75 @@ const term = new Terminal({
 });
 
 term.attachCustomKeyEventHandler((event) => {
-  return !isImeSwitchKeyEvent(event);
+  return !shouldBypassTerminalKeyEvent(event, terminalCompositionActive);
 });
 
 term.loadAddon(fitAddon);
 term.open(terminalElement);
 focusTerminalSoon();
 
+terminalElement.addEventListener('compositionstart', () => {
+  terminalCompositionActive = true;
+}, true);
+
+terminalElement.addEventListener('compositionend', () => {
+  terminalCompositionActive = false;
+}, true);
+
 terminalElement.addEventListener('pointerdown', () => {
   focusTerminalSoon();
+});
+
+terminalShell.addEventListener('dragenter', (event) => {
+  if (!dataTransferHasFiles(event.dataTransfer)) return;
+  event.preventDefault();
+  terminalFileDragDepth += 1;
+  setTerminalFileDragActive(true);
+});
+
+terminalShell.addEventListener('dragover', (event) => {
+  if (!dataTransferHasFiles(event.dataTransfer)) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'copy';
+  setTerminalFileDragActive(true);
+});
+
+terminalShell.addEventListener('dragleave', () => {
+  if (terminalFileDragDepth > 0) terminalFileDragDepth -= 1;
+  if (terminalFileDragDepth === 0) setTerminalFileDragActive(false);
+});
+
+terminalShell.addEventListener('drop', (event) => {
+  if (!dataTransferHasFiles(event.dataTransfer)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  terminalFileDragDepth = 0;
+  setTerminalFileDragActive(false);
+
+  const paths = [];
+  for (const file of Array.from(event.dataTransfer.files || [])) {
+    try {
+      paths.push(window.codexShell.getPathForFile(file));
+    } catch (_error) {
+      // Ignore entries Chromium cannot map to a local filesystem path.
+    }
+  }
+
+  const paste = buildDroppedFilePaste(paths);
+  if (!paste) return;
+  term.focus();
+  term.paste(paste);
+});
+
+window.addEventListener('dragover', (event) => {
+  if (dataTransferHasFiles(event.dataTransfer)) event.preventDefault();
+});
+
+window.addEventListener('drop', (event) => {
+  if (!dataTransferHasFiles(event.dataTransfer)) return;
+  event.preventDefault();
+  terminalFileDragDepth = 0;
+  setTerminalFileDragActive(false);
 });
 
 window.addEventListener('focus', () => {
@@ -240,6 +319,10 @@ window.addEventListener('focus', () => {
   if (!active || active === document.body || active === terminalElement) {
     focusTerminalSoon();
   }
+});
+
+window.addEventListener('blur', () => {
+  terminalCompositionActive = false;
 });
 
 window.addEventListener('keydown', (event) => {
@@ -258,23 +341,9 @@ function focusTerminalSoon() {
   }, 0);
 }
 
-function isImeSwitchKeyEvent(event) {
-  if (!event) return false;
-  if (event.metaKey || event.altKey) return false;
-  const key = String(event.key || '').toLowerCase();
-  const code = String(event.code || '');
-  const ctrlSpace = event.ctrlKey && !event.shiftKey && (
-    key === ' ' ||
-    key === 'spacebar' ||
-    code === 'Space'
-  );
-  const ctrlShift = event.ctrlKey && event.shiftKey && (
-    key === 'control' ||
-    key === 'shift' ||
-    code.startsWith('Control') ||
-    code.startsWith('Shift')
-  );
-  return ctrlSpace || ctrlShift;
+function setTerminalFileDragActive(active) {
+  terminalShell.classList.toggle('is-file-dragging', Boolean(active));
+  terminalDropOverlay.setAttribute('aria-hidden', active ? 'false' : 'true');
 }
 
 function fit() {
@@ -712,12 +781,28 @@ settingsForm.addEventListener('submit', async (event) => {
 });
 
 languageSelect.addEventListener('change', () => {
-  setLanguage(languageSelect.value);
+  const language = normalizeLanguage(languageSelect.value);
+  setLanguage(language);
   if (currentConfig) {
+    currentConfig.ui = currentConfig.ui || {};
+    currentConfig.ui.language = language;
     renderFeishuConfiguredState(currentConfig);
   }
   renderFeishuConnectStatus(currentFeishuStatus);
   renderUpdateStatus(currentUpdateStatus);
+  setSettingsStatus(t('savingSettings'));
+
+  const saveRequest = queueLanguageSave(language);
+  void saveRequest.then((savedConfig) => {
+    if (currentLanguage !== language) return;
+    currentConfig = savedConfig;
+    setSettingsStatus(t('settingsSaved'));
+  }).catch((error) => {
+    if (currentLanguage !== language) return;
+    setSettingsStatus(t('languageSaveFailed', {
+      error: error.message || 'Unknown error'
+    }));
+  });
 });
 
 latexRenderingCheckbox.addEventListener('change', syncLatexSettingsState);
@@ -742,8 +827,12 @@ updateActionButton.addEventListener('click', async () => {
   }
 });
 
-connectFeishuButton.addEventListener('click', () => {
-  startFeishuConnection({ fromOnboarding: onboardingStage === 'feishu' });
+connectFeishuButton.addEventListener('click', async () => {
+  if (hasConfiguredFeishuConnection(currentConfig)) {
+    await resetFeishuConnection();
+    return;
+  }
+  await startFeishuConnection({ fromOnboarding: onboardingStage === 'feishu' });
 });
 
 tryFeishuFromOnboardingButton.addEventListener('click', () => {
@@ -771,6 +860,19 @@ async function startFeishuConnection({ fromOnboarding = false } = {}) {
     renderFeishuConnectStatus({
       status: 'error',
       message: error.message || t('failedStartFeishuAuthorization')
+    });
+  }
+}
+
+async function resetFeishuConnection() {
+  try {
+    const status = await window.codexShell.resetFeishuConnection();
+    if (status?.canceled) return;
+    renderFeishuConnectStatus(status);
+  } catch (error) {
+    renderFeishuConnectStatus({
+      status: 'error',
+      message: error.message || t('failedResetFeishuConnection')
     });
   }
 }
@@ -868,6 +970,7 @@ async function completeOnboarding(reason) {
 }
 
 async function loadSettings() {
+  await waitForPendingLanguageSave();
   setSettingsStatus(t('loadingSettings'));
   currentConfig = await window.codexShell.getConfig();
   populateSettings(currentConfig);
@@ -878,6 +981,7 @@ async function loadSettings() {
 }
 
 async function saveSettings() {
+  await waitForPendingLanguageSave();
   if (!currentConfig) {
     currentConfig = await window.codexShell.getConfig();
   }
@@ -896,6 +1000,23 @@ async function saveSettings() {
   setSettingsStatus(t('settingsSaved'));
 }
 
+function queueLanguageSave(language) {
+  const request = languageSavePromise
+    .catch(() => null)
+    .then(() => window.codexShell.setUiLanguage(language));
+  languageSavePromise = request;
+  return request;
+}
+
+async function waitForPendingLanguageSave() {
+  try {
+    const savedConfig = await languageSavePromise;
+    if (savedConfig) currentConfig = savedConfig;
+  } catch (_error) {
+    // The language change handler already reports persistence failures.
+  }
+}
+
 function populateSettings(config) {
   setLanguage(config.ui?.language);
   setValue('uiLanguage', currentLanguage);
@@ -909,13 +1030,23 @@ function populateSettings(config) {
 
 function renderFeishuConfiguredState(config) {
   const feishu = config.plugins?.feishu || {};
-  if (feishu.appId) {
+  if (hasConfiguredFeishuConnection(config)) {
     feishuConnectState.textContent = t('configured', { value: maskValue(feishu.appId) });
-    connectFeishuButton.textContent = t('reconnectFeishu');
+    renderFeishuConnectionButton(true);
   } else {
     feishuConnectState.textContent = t('notConnected');
-    connectFeishuButton.textContent = t('connectFeishu');
+    renderFeishuConnectionButton(false);
   }
+}
+
+function hasConfiguredFeishuConnection(config) {
+  const feishu = config?.plugins?.feishu || {};
+  return Boolean(feishu.appId && feishu.appSecret);
+}
+
+function renderFeishuConnectionButton(configured) {
+  connectFeishuButton.textContent = t(configured ? 'resetFeishu' : 'connectFeishu');
+  connectFeishuButton.classList.toggle('danger-text-button', configured);
 }
 
 function collectSettings(baseConfig) {
@@ -1053,7 +1184,7 @@ function renderFeishuConnectStatus(status = { status: 'idle' }) {
     feishuConnectState.textContent = status.pluginError
       ? status.message
       : t('connected', { value: maskValue(status.appId) });
-    connectFeishuButton.textContent = t('reconnectFeishu');
+    renderFeishuConnectionButton(true);
     openFeishuConnectButton.disabled = true;
     cancelFeishuConnectButton.disabled = true;
     feishuConnectQr.hidden = true;

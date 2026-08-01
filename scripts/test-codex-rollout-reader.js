@@ -102,6 +102,20 @@ async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
     ].join('\n'),
     internal_chat_message_metadata_passthrough: { turn_id: turnId }
   });
+  const jsonSerializedRequest = event('response_item', {
+    type: 'custom_tool_call',
+    name: 'exec',
+    call_id: 'call-authorization-json-properties',
+    input: 'const r = await tools.exec_command({' + [
+      '"cmd":".venv-demo/bin/python -m pip install gradio==5.17.1 einops"',
+      `"workdir":${JSON.stringify(fixture.cwd)}`,
+      '"yield_time_ms":30000',
+      '"sandbox_permissions":"require_escalated"',
+      '"justification":"是否允许联网下载缺失依赖？"',
+      '"prefix_rule":[".venv-demo/bin/python","-m","pip","install"]'
+    ].join(',') + '}); text(r.output);\n',
+    internal_chat_message_metadata_passthrough: { turn_id: turnId }
+  });
   appendRollout(fixture.rolloutPath, [
     firstRequest,
     firstRequest,
@@ -133,6 +147,12 @@ async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
       call_id: 'call-authorization-second',
       output: [{ type: 'input_text', text: 'ok' }]
     }),
+    jsonSerializedRequest,
+    event('response_item', {
+      type: 'custom_tool_call_output',
+      call_id: 'call-authorization-json-properties',
+      output: [{ type: 'input_text', text: 'ok' }]
+    }),
     event('event_msg', {
       type: 'agent_message',
       phase: 'final_answer',
@@ -150,13 +170,21 @@ async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
     events
       .filter((entry) => entry.type === 'authorization_requested')
       .map((entry) => entry.callId),
-    ['call-authorization-first', 'call-authorization-second']
+    [
+      'call-authorization-first',
+      'call-authorization-second',
+      'call-authorization-json-properties'
+    ]
   );
   assert.deepEqual(
     events
       .filter((entry) => entry.type === 'authorization_completed')
       .map((entry) => entry.callId),
-    ['call-authorization-first', 'call-authorization-second']
+    [
+      'call-authorization-first',
+      'call-authorization-second',
+      'call-authorization-json-properties'
+    ]
   );
   const approvals = events
     .filter((entry) => entry.type === 'authorization_requested')
@@ -165,6 +193,11 @@ async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
   assert.equal(approvals[0].command, 'sudo -n /usr/bin/true');
   assert.equal(approvals[0].reason, 'Reason: 验证第一项授权');
   assert.equal(approvals[1].command, 'xdotool windowactivate 42');
+  assert.equal(
+    approvals[2].command,
+    '.venv-demo/bin/python -m pip install gradio==5.17.1 einops'
+  );
+  assert.equal(approvals[2].reason, 'Reason: 是否允许联网下载缺失依赖？');
   assert.doesNotMatch(JSON.stringify(approvals), /terminal garbage|�|\u0000/);
 
   assert.deepEqual(
@@ -178,6 +211,15 @@ async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
       justification: '该操作已被本地规则放行',
       prefixRule: ['git', 'tag']
     }]
+  );
+  assert.deepEqual(
+    extractEscalatedExecRequests(jsonSerializedRequest.payload.input),
+    [{
+      command: '.venv-demo/bin/python -m pip install gradio==5.17.1 einops',
+      justification: '是否允许联网下载缺失依赖？',
+      prefixRule: ['.venv-demo/bin/python', '-m', 'pip', 'install']
+    }],
+    'current Codex JSON-serialized tool arguments must trigger authorization'
   );
   assert.deepEqual(
     parseAllowedExecPrefixes([

@@ -88,6 +88,12 @@ It calls the SDK `registerApp` flow, opens a Feishu authorization link, stores
 the returned app credentials, enables long connection mode, and adds the
 authorizing user's open ID to `allowedOpenIds`.
 
+Once configured, the Settings action becomes `Reset Feishu Connection`. After
+confirmation, Remote Codex stops the old transport, clears the saved app
+credentials and access bindings, and starts a fresh authorization flow. The old
+app must be deleted manually in the Feishu Developer Console when it is no
+longer needed.
+
 ## Bot custom menu
 
 Configure the bot custom menu in the Feishu Developer Console after connecting

@@ -1,8 +1,10 @@
 const assert = require('node:assert/strict');
 const feishuModule = require('../src/plugins/feishu');
 const {
+  clearFeishuConnection,
   connectOrReconnectFeishu,
-  hasSavedFeishuCredentials
+  hasSavedFeishuCredentials,
+  resetFeishuConnection
 } = require('../src/feishuConnectionCoordinator');
 const { FeishuRegistrationManager } = require('../src/plugins/feishu/registrationManager');
 
@@ -10,9 +12,96 @@ async function main() {
   await testFirstConnectionRegistersAnApp();
   await testReconnectReusesSavedCredentials();
   await testFailedReconnectDoesNotCreateAnotherApp();
+  await testResetClearsOldConnectionBeforeRegisteringAgain();
   await testExistingAppReauthorizationTargetsTheSameApp();
   await testPluginConnectionWaiter();
   process.stdout.write('Feishu existing-app reconnect tests passed.\n');
+}
+
+async function testResetClearsOldConnectionBeforeRegisteringAgain() {
+  const calls = [];
+  const config = {
+    ui: { language: 'zh-CN' },
+    plugins: {
+      feishu: {
+        enabled: true,
+        mode: 'long_connection',
+        appId: 'cli_old_app',
+        appSecret: 'old-secret',
+        encryptKey: 'old-encrypt-key',
+        verificationToken: 'old-token',
+        defaultChatId: 'oc_old_chat',
+        customWebhookUrl: 'https://example.invalid/webhook',
+        allowedOpenIds: ['ou_old'],
+        allowedChatIds: ['oc_old_chat'],
+        connectSource: 'register_app',
+        connectedAt: '2026-01-01T00:00:00.000Z',
+        authorizedOpenId: 'ou_old',
+        tenantBrand: 'feishu',
+        latexRenderingEnabled: false
+      }
+    }
+  };
+  const cleared = clearFeishuConnection(config);
+
+  assert.equal(config.plugins.feishu.appId, 'cli_old_app', 'reset must not mutate live input');
+  assert.deepEqual({
+    enabled: cleared.plugins.feishu.enabled,
+    appId: cleared.plugins.feishu.appId,
+    appSecret: cleared.plugins.feishu.appSecret,
+    encryptKey: cleared.plugins.feishu.encryptKey,
+    verificationToken: cleared.plugins.feishu.verificationToken,
+    defaultChatId: cleared.plugins.feishu.defaultChatId,
+    allowedOpenIds: cleared.plugins.feishu.allowedOpenIds,
+    allowedChatIds: cleared.plugins.feishu.allowedChatIds,
+    connectSource: cleared.plugins.feishu.connectSource,
+    connectedAt: cleared.plugins.feishu.connectedAt,
+    authorizedOpenId: cleared.plugins.feishu.authorizedOpenId,
+    tenantBrand: cleared.plugins.feishu.tenantBrand
+  }, {
+    enabled: false,
+    appId: '',
+    appSecret: '',
+    encryptKey: '',
+    verificationToken: '',
+    defaultChatId: '',
+    allowedOpenIds: [],
+    allowedChatIds: [],
+    connectSource: '',
+    connectedAt: '',
+    authorizedOpenId: '',
+    tenantBrand: ''
+  });
+  assert.equal(cleared.plugins.feishu.latexRenderingEnabled, false);
+  assert.equal(
+    cleared.plugins.feishu.customWebhookUrl,
+    'https://example.invalid/webhook',
+    'resetting the app connection must preserve unrelated custom-webhook settings'
+  );
+
+  const result = await resetFeishuConnection({
+    config,
+    persistConfig(nextConfig) {
+      calls.push('persist');
+      assert.equal(nextConfig.plugins.feishu.appId, '');
+      return { ...nextConfig, configPath: '/tmp/remote-codex-reset.json' };
+    },
+    async restartPlugins(savedConfig) {
+      calls.push('stop-old-connection');
+      assert.equal(savedConfig.plugins.feishu.enabled, false);
+    },
+    registrationManager: {
+      start() {
+        calls.push('start-new-registration');
+        return { status: 'starting', connectionMode: 'new_app' };
+      }
+    },
+    logger: { event() {} }
+  });
+
+  assert.deepEqual(calls, ['persist', 'stop-old-connection', 'start-new-registration']);
+  assert.equal(result.config.plugins.feishu.appId, '');
+  assert.equal(result.status.connectionMode, 'new_app');
 }
 
 async function testFirstConnectionRegistersAnApp() {
@@ -151,6 +240,7 @@ async function testExistingAppReauthorizationTargetsTheSameApp() {
 
   assert.equal(registerOptions.appId, 'cli_0123456789abcdef');
   assert.equal(manager.getStatus().appId, 'cli_0123456789abcdef');
+  assert.equal(manager.getStatus().connectionMode, 'new_app');
 }
 
 async function testPluginConnectionWaiter() {

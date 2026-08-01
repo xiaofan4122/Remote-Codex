@@ -1,39 +1,63 @@
-function parseLaunchOptions(argv = process.argv, env = process.env) {
-  const args = getUserArgs(argv);
-  const resumeArgs = parseCliResumeArgs(args) ?? parseEnvResumeArgs(env);
+function parseLaunchOptions(argv = process.argv, env = process.env, options = {}) {
+  const args = getUserArgs(argv, options);
+  const cliOptions = parseCliOptions(args);
+  const resumeArgs = cliOptions.resumeDisabled
+    ? null
+    : cliOptions.resumeArgs ?? parseEnvResumeArgs(env);
   return {
     args,
+    codexArgs: cliOptions.codexArgs,
     resumeArgs
   };
 }
 
-function getUserArgs(argv) {
-  const values = Array.isArray(argv) ? argv.slice(2) : [];
-  return values.filter((arg) => arg !== '--');
+function getUserArgs(argv, options = {}) {
+  if (!Array.isArray(argv)) return [];
+  return argv.slice(options.packaged ? 1 : 2);
 }
 
-function parseCliResumeArgs(args) {
-  if (!Array.isArray(args) || args.length === 0) return null;
+function parseCliOptions(args) {
+  const values = Array.isArray(args) ? args : [];
 
-  if (args[0] === '--no-resume') {
-    return null;
+  if (values[0] === '--no-resume') {
+    return {
+      codexArgs: values.slice(1),
+      resumeArgs: null,
+      resumeDisabled: true
+    };
   }
 
-  if (args[0] === 'resume') {
-    return args.slice(1);
+  if (values[0] === 'resume') {
+    return {
+      codexArgs: [],
+      resumeArgs: values.slice(1),
+      resumeDisabled: false
+    };
   }
 
-  const lastIndex = args.indexOf('--resume-last');
+  const lastIndex = values.indexOf('--resume-last');
   if (lastIndex >= 0) {
-    return ['--last', ...args.slice(lastIndex + 1)];
+    return {
+      codexArgs: values.slice(0, lastIndex),
+      resumeArgs: ['--last', ...values.slice(lastIndex + 1)],
+      resumeDisabled: false
+    };
   }
 
-  const resumeIndex = args.indexOf('--resume');
+  const resumeIndex = values.indexOf('--resume');
   if (resumeIndex >= 0) {
-    return args.slice(resumeIndex + 1);
+    return {
+      codexArgs: values.slice(0, resumeIndex),
+      resumeArgs: values.slice(resumeIndex + 1),
+      resumeDisabled: false
+    };
   }
 
-  return null;
+  return {
+    codexArgs: [...values],
+    resumeArgs: null,
+    resumeDisabled: false
+  };
 }
 
 function parseEnvResumeArgs(env = process.env) {
@@ -54,9 +78,12 @@ function parseEnvResumeArgs(env = process.env) {
 
 function buildCodexArgs(baseArgs, launchOptions = {}) {
   const normalizedBaseArgs = Array.isArray(baseArgs) ? [...baseArgs] : [];
+  const codexArgs = Array.isArray(launchOptions.codexArgs)
+    ? [...launchOptions.codexArgs]
+    : [];
   const resumeArgs = launchOptions.resumeArgs;
-  if (!Array.isArray(resumeArgs)) return normalizedBaseArgs;
-  return ['resume', ...normalizedBaseArgs, ...resumeArgs];
+  if (!Array.isArray(resumeArgs)) return [...normalizedBaseArgs, ...codexArgs];
+  return ['resume', ...normalizedBaseArgs, ...codexArgs, ...resumeArgs];
 }
 
 module.exports = {

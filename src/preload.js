@@ -1,12 +1,14 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('codexShell', {
   start: (cwd) => ipcRenderer.invoke('session:start', cwd),
   chooseDirectory: () => ipcRenderer.invoke('session:choose-directory'),
   getConfig: () => ipcRenderer.invoke('config:get'),
   saveConfig: (config) => ipcRenderer.invoke('config:save', config),
+  setUiLanguage: (language) => ipcRenderer.invoke('ui:set-language', language),
   completeOnboarding: (reason) => ipcRenderer.invoke('ui:onboarding-complete', reason),
   startFeishuConnect: (config) => ipcRenderer.invoke('feishu:connect-start', config),
+  resetFeishuConnection: () => ipcRenderer.invoke('feishu:connection-reset'),
   cancelFeishuConnect: () => ipcRenderer.invoke('feishu:connect-cancel'),
   getFeishuConnectStatus: () => ipcRenderer.invoke('feishu:connect-status'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
@@ -14,6 +16,7 @@ contextBridge.exposeInMainWorld('codexShell', {
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),
   downloadUpdate: () => ipcRenderer.invoke('updates:download'),
   installUpdate: () => ipcRenderer.invoke('updates:install'),
+  getPathForFile: (file) => webUtils.getPathForFile(file),
   write: (data) => ipcRenderer.send('terminal:input', data),
   resize: (size) => ipcRenderer.send('terminal:resize', size),
   snapshot: (text) => ipcRenderer.send('terminal:snapshot', text),

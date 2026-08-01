@@ -111,6 +111,18 @@ button.primary-button:hover {
   background: #3b82f6;
 }
 
+button.danger-text-button {
+  border-color: #7f1d1d;
+  background: #2a1b1d;
+  color: #f87171;
+}
+
+button.danger-text-button:hover {
+  border-color: #b91c1c;
+  background: #3b1d20;
+  color: #fca5a5;
+}
+
 button.is-active,
 button[aria-pressed="true"] {
   border-color: #60a5fa;
@@ -198,6 +210,32 @@ textarea {
 #terminalScrollSpacer {
   width: 1px;
   min-height: 100%;
+}
+
+.terminal-drop-overlay {
+  position: absolute;
+  inset: 10px;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  border: 2px dashed rgba(96, 165, 250, 0.85);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.9);
+  color: #dbeafe;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.5;
+  text-align: center;
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+  transition: opacity 100ms ease-out, visibility 100ms ease-out;
+}
+
+#terminalShell.is-file-dragging .terminal-drop-overlay {
+  opacity: 1;
+  visibility: visible;
 }
 
 .onboarding-welcome {

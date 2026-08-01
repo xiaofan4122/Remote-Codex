@@ -1,5 +1,9 @@
 # Remote Codex
 
+<p align="center">
+  <img src="docs/assets/remote-codex-logo.png" alt="Remote Codex" width="600" />
+</p>
+
 Linux desktop and Feishu remote-control shell for the native Codex CLI.
 
 > **Linux only.** Remote Codex intentionally focuses on Linux, where an
@@ -13,22 +17,86 @@ Requirements:
 - A glibc 2.31 or newer Linux distribution, such as Ubuntu 20.04+, on `x86_64`
   or `arm64`.
 - The native `codex` command available on `PATH` and signed in.
-- `curl` or `wget`, `tar`, and `sha256sum` for the one-line installer.
+- `sha256sum` to verify a downloaded release package.
 
-Install the latest release for the current user; no `sudo` or local Node.js
-toolchain is required:
+### Ubuntu and Debian (recommended)
+
+Install the prebuilt `.deb` package with APT. Downloading the complete package
+before installation makes interrupted downloads easier to resume, and APT
+handles system dependencies, upgrades, and removal.
+
+Choose the package that matches `dpkg --print-architecture`:
+
+| Architecture | Package | SHA-256 checksum |
+| --- | --- | --- |
+| `amd64` (`x86_64`) | [remote-codex-linux-amd64.deb](https://github.com/xiaofan4122/Remote-Codex/releases/latest/download/remote-codex-linux-amd64.deb) | [remote-codex-linux-amd64.deb.sha256](https://github.com/xiaofan4122/Remote-Codex/releases/latest/download/remote-codex-linux-amd64.deb.sha256) |
+| `arm64` (`aarch64`) | [remote-codex-linux-arm64.deb](https://github.com/xiaofan4122/Remote-Codex/releases/latest/download/remote-codex-linux-arm64.deb) | [remote-codex-linux-arm64.deb.sha256](https://github.com/xiaofan4122/Remote-Codex/releases/latest/download/remote-codex-linux-arm64.deb.sha256) |
+
+Download the package and its checksum file into the same directory, then verify
+and install it. For an `amd64` system:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xiaofan4122/Remote-Codex/main/install.sh | bash
+cd ~/Downloads
+sha256sum --check remote-codex-linux-amd64.deb.sha256
+sudo apt install ./remote-codex-linux-amd64.deb
 ```
 
-The installer downloads the matching prebuilt GitHub Release, verifies its
-SHA-256 checksum, installs it under `~/.local/opt/remote-codex`, creates the
-`remote-codex` command and desktop entry, and installs the bundled
-`remote-codex-send-files` skill. It reports each installation stage and, in an
-interactive terminal, displays live download percentage, speed, elapsed time,
-and estimated time remaining. Non-interactive runs keep concise stage logs.
-It does not edit shell startup files.
+Use the `arm64` filenames instead on an ARM64 system. Installing the package
+adds the desktop entry and the `remote-codex` command. The bundled
+`remote-codex-send-files` skill is installed or refreshed for the current user
+when the application first starts.
+
+To remove the Debian package while preserving configuration in your home
+directory:
+
+```bash
+sudo apt remove remote-codex
+```
+
+All current packages and portable archives are available on the
+[GitHub Releases page](https://github.com/xiaofan4122/Remote-Codex/releases/latest).
+
+### Other Linux distributions or installation without sudo
+
+The user-local installer supports the same `x86_64` and `arm64` targets without
+requiring root access. Download the release-published script first so a failed
+script download is never piped directly into Bash, optionally inspect it, and
+then run it:
+
+```bash
+curl -fL --retry 5 --retry-delay 2 \
+  https://github.com/xiaofan4122/Remote-Codex/releases/latest/download/install.sh \
+  --output remote-codex-install.sh &&
+  less remote-codex-install.sh &&
+  bash remote-codex-install.sh
+```
+
+This path requires `curl` or `wget`, `tar`, and `sha256sum`. The installer
+downloads the matching portable archive, verifies its SHA-256 checksum, and
+atomically activates it under `~/.local/opt/remote-codex`. It also creates the
+user-local command and desktop entry and installs the bundled skill. It does
+not edit shell startup files.
+
+Running the installer again performs an idempotent update. To install a
+specific tagged version with the downloaded script:
+
+```bash
+bash remote-codex-install.sh --version 0.1.0
+```
+
+Remove a user-local installation and its managed skill while preserving user
+configuration with:
+
+```bash
+remote-codex-uninstall
+```
+
+The installer retries failed downloads, but it does not resume a partially
+downloaded application archive. On an unreliable connection, Debian and Ubuntu
+users should prefer downloading the `.deb` with a browser or resumable download
+tool.
+
+### Start and update
 
 Start from a project directory:
 
@@ -36,29 +104,6 @@ Start from a project directory:
 cd /path/to/project
 remote-codex
 ```
-
-Running the install command again performs an idempotent update. Install a
-specific tagged version with:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/xiaofan4122/Remote-Codex/main/install.sh |
-  bash -s -- --version 0.1.0
-```
-
-Uninstall the application and its managed Codex skill while preserving user
-configuration:
-
-```bash
-remote-codex-uninstall
-```
-
-Prebuilt `.deb` files and portable `.tar.gz` archives for both supported
-architectures are also attached to every GitHub Release. The `.deb` install
-path installs or refreshes the bundled skill when the application first
-starts.
-
-Release filenames use `x64` for portable archives and Debian's native `amd64`
-name for x64 `.deb` packages; ARM64 uses `arm64` for both.
 
 Remote Codex can update itself from GitHub Releases. In **Settings → Software
 Updates**, keep automatic updates enabled to check after startup, download the
@@ -73,9 +118,6 @@ by `install.sh` download the complete `.tar.gz`, verify its SHA-256 checksum,
 and reuse the installer's versioned directory plus atomic `current` symlink.
 Application code never runs a partial `.deb` patch. Development checkouts and
 unrecognized portable directories do not update themselves.
-
-For a more inspectable installation flow, download `install.sh`, review it,
-then run it locally instead of piping it directly to Bash.
 
 ## Develop From Source
 
@@ -115,6 +157,15 @@ After installing, open the app from your terminal with:
 
 ```bash
 remote-codex
+```
+
+Arguments that belong to the Codex CLI are forwarded when the native session
+starts. Configured `codex.args` are applied first, followed by the launch
+arguments:
+
+```bash
+remote-codex --model gpt-5 "Review the current changes"
+remote-codex --search --sandbox workspace-write
 ```
 
 Resume an existing Codex TUI session at startup:
@@ -302,11 +353,12 @@ before Feishu's ten-minute lease expires. If Feishu still returns CardKit error
 `200510`, the same card is reopened and the failed update is retried with a new,
 strictly increasing sequence number.
 
-After the first authorization, `Reconnect Feishu` reuses the saved App ID and
-App Secret and restarts only the long-connection transport. It does not create a
-replacement bot. Because the remote controller remains alive and the same chat
-ID is reused, the chat stays attached to the current visible Codex PTY. A failed
-reconnect is reported as an error instead of silently registering another app.
+After the first authorization, `Reset Feishu Connection` is shown as a red
+destructive action. After confirmation, it stops the old long connection,
+removes the locally saved app credentials and access bindings, and starts a new
+`registerApp` authorization flow. Remote Codex cannot delete the old app in
+Feishu; delete it manually in the Feishu Developer Console if it is no longer
+needed.
 
 ### Multiple instances
 

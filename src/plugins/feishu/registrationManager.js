@@ -23,12 +23,16 @@ class FeishuRegistrationManager {
     this.update({
       status: 'starting',
       message: 'Preparing Feishu authorization...',
+      connectionMode: 'new_app',
       startedAt: new Date().toISOString(),
       url: '',
       qrDataUrl: '',
       appId: '',
       userOpenId: '',
       tenantBrand: '',
+      connectedAt: '',
+      configPath: '',
+      pluginError: '',
       errorCode: ''
     });
 

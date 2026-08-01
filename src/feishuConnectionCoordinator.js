@@ -3,6 +3,49 @@ function hasSavedFeishuCredentials(config) {
   return Boolean(String(feishu.appId || '').trim() && String(feishu.appSecret || '').trim());
 }
 
+function clearFeishuConnection(config) {
+  const next = JSON.parse(JSON.stringify(config || {}));
+  next.plugins = next.plugins || {};
+  next.plugins.feishu = {
+    ...(next.plugins.feishu || {}),
+    enabled: false,
+    mode: 'long_connection',
+    appId: '',
+    appSecret: '',
+    encryptKey: '',
+    verificationToken: '',
+    defaultChatId: '',
+    allowedOpenIds: [],
+    allowedChatIds: [],
+    connectSource: '',
+    connectedAt: '',
+    authorizedOpenId: '',
+    tenantBrand: ''
+  };
+  return next;
+}
+
+async function resetFeishuConnection({
+  config,
+  persistConfig,
+  restartPlugins,
+  registrationManager,
+  logger = console
+}) {
+  const previousAppId = config?.plugins?.feishu?.appId || '';
+  const savedConfig = await persistConfig(clearFeishuConnection(config));
+
+  await restartPlugins(savedConfig);
+  logger.event?.('feishu.connection.reset', {
+    previousAppId: maskAppId(previousAppId)
+  });
+
+  return {
+    config: savedConfig,
+    status: registrationManager.start()
+  };
+}
+
 async function connectOrReconnectFeishu({
   config,
   restartPlugins,
@@ -53,6 +96,8 @@ function maskAppId(appId) {
 }
 
 module.exports = {
+  clearFeishuConnection,
   connectOrReconnectFeishu,
-  hasSavedFeishuCredentials
+  hasSavedFeishuCredentials,
+  resetFeishuConnection
 };

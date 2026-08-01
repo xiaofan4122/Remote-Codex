@@ -18,7 +18,10 @@ const { buildResumeHint } = require('./resumeHint');
 const { buildRemoteInputNotice } = require('./remoteVisualNotice');
 const { installBundledSkill } = require('./bundledSkillInstaller');
 const { configureSingleInstance } = require('./singleInstanceCoordinator');
-const { connectOrReconnectFeishu } = require('./feishuConnectionCoordinator');
+const {
+  connectOrReconnectFeishu,
+  resetFeishuConnection
+} = require('./feishuConnectionCoordinator');
 const { createAppUpdateManager } = require('./appUpdateManager');
 
 let mainWindow;
@@ -29,7 +32,9 @@ let pluginManager;
 let feishuRegistrationManager;
 let appUpdateManager;
 let signalShutdownStarted = false;
-const launchOptions = parseLaunchOptions();
+const launchOptions = parseLaunchOptions(process.argv, process.env, {
+  packaged: app.isPackaged
+});
 const CODEX_UPDATE_RESTART_DELAY_MS = 1200;
 
 const MAIN_I18N = {
@@ -37,13 +42,23 @@ const MAIN_I18N = {
     chooseProjectDirectory: '选择项目目录',
     contextCopy: '复制',
     contextPaste: '粘贴',
-    contextSelectAll: '全选'
+    contextSelectAll: '全选',
+    resetFeishuTitle: '重置飞书链接',
+    resetFeishuMessage: '是否删除原本链接并重新配置？',
+    resetFeishuDetail: '飞书应用需要在应用管理后台自行删除。',
+    resetFeishuCancel: '取消',
+    resetFeishuConfirm: '删除并重新配置'
   },
   en: {
     chooseProjectDirectory: 'Choose project directory',
     contextCopy: 'Copy',
     contextPaste: 'Paste',
-    contextSelectAll: 'Select All'
+    contextSelectAll: 'Select All',
+    resetFeishuTitle: 'Reset Feishu Connection',
+    resetFeishuMessage: 'Delete the existing connection and configure Feishu again?',
+    resetFeishuDetail: 'You must delete the old Feishu app manually in the Developer Console.',
+    resetFeishuCancel: 'Cancel',
+    resetFeishuConfirm: 'Delete and Reconfigure'
   }
 };
 
@@ -232,6 +247,7 @@ function createWindow() {
     minWidth: 760,
     minHeight: 520,
     title: 'Remote Codex',
+    icon: resolveWindowIconPath(),
     backgroundColor: '#111418',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -247,6 +263,12 @@ function createWindow() {
     mainWindow = null;
   });
   return mainWindow;
+}
+
+function resolveWindowIconPath() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'icon.png')
+    : path.join(__dirname, '..', 'build', 'icons', '512x512.png');
 }
 
 function installContextMenu(window) {
@@ -388,6 +410,16 @@ if (!hasSingleInstanceLock) {
     return { config, pluginError };
   });
 
+  ipcMain.handle('ui:set-language', (_event, language) => {
+    config = saveConfigPatch({
+      ui: { language }
+    }, { configPath: config.configPath });
+    logger.event?.('ui.language.updated', {
+      language: config.ui.language
+    });
+    return config;
+  });
+
   ipcMain.handle('ui:onboarding-complete', (_event, reason) => {
     config = saveConfigPatch({
       ui: { onboardingCompleted: true }
@@ -422,6 +454,40 @@ if (!hasSingleInstanceLock) {
       registrationManager: getFeishuRegistrationManager(),
       logger
     });
+  });
+
+  ipcMain.handle('feishu:connection-reset', async () => {
+    const confirmation = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: mainText('resetFeishuTitle'),
+      message: mainText('resetFeishuMessage'),
+      detail: mainText('resetFeishuDetail'),
+      buttons: [mainText('resetFeishuCancel'), mainText('resetFeishuConfirm')],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true
+    });
+    if (confirmation.response !== 1) {
+      return { status: 'idle', canceled: true };
+    }
+
+    const result = await resetFeishuConnection({
+      config,
+      persistConfig(nextConfig) {
+        config = saveConfig(nextConfig);
+        appUpdateManager?.updateConfig(config);
+        manager.updateConfig(config);
+        execRunner.updateConfig(config);
+        appServerRunner.updateConfig(config);
+        remoteController?.updateConfig(config);
+        mainWindow?.webContents.send('config:updated', config);
+        return config;
+      },
+      restartPlugins,
+      registrationManager: getFeishuRegistrationManager(),
+      logger
+    });
+    return result.status;
   });
 
   ipcMain.handle('feishu:connect-cancel', () => {
