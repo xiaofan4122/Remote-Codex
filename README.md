@@ -25,7 +25,10 @@ curl -fsSL https://raw.githubusercontent.com/xiaofan4122/Remote-Codex/main/insta
 The installer downloads the matching prebuilt GitHub Release, verifies its
 SHA-256 checksum, installs it under `~/.local/opt/remote-codex`, creates the
 `remote-codex` command and desktop entry, and installs the bundled
-`remote-codex-send-files` skill. It does not edit shell startup files.
+`remote-codex-send-files` skill. It reports each installation stage and, in an
+interactive terminal, displays live download percentage, speed, elapsed time,
+and estimated time remaining. Non-interactive runs keep concise stage logs.
+It does not edit shell startup files.
 
 Start from a project directory:
 

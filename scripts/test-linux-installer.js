@@ -37,7 +37,20 @@ try {
 
   const firstInstall = runInstaller();
   assert.equal(firstInstall.status, 0, firstInstall.stderr || firstInstall.stdout);
-  assert.match(firstInstall.stdout, /Checksum verified/);
+  for (const expectedStage of [
+    '[1/8] Checking system compatibility',
+    '[2/8] Resolving the release version',
+    `[3/8] Downloading Remote Codex ${version}`,
+    '[4/8] Verifying release integrity',
+    '[5/8] Inspecting and extracting the archive',
+    '[6/8] Installing application files atomically',
+    '[7/8] Installing command and desktop integrations',
+    '[8/8] Installation complete'
+  ]) {
+    assert.ok(firstInstall.stdout.includes(expectedStage), `missing installer stage: ${expectedStage}`);
+  }
+  assert.match(firstInstall.stdout, /Download complete: [0-9.]+ (?:bytes|KiB|MiB|GiB)/);
+  assert.match(firstInstall.stdout, /SHA-256 verified: [0-9a-f]{64}/);
   assert.match(firstInstall.stdout, new RegExp(`Installed Remote Codex ${version}`));
   assertInstallation();
 
@@ -49,6 +62,9 @@ try {
     releaseEntriesBefore,
     'reinstalling an immutable release should be idempotent'
   );
+  assert.match(secondInstall.stdout, /Release already present; reusing/);
+
+  testInteractiveDownloadConfiguration();
 
   fs.writeFileSync(checksumPath, `${'0'.repeat(64)}  ${archiveName}\n`);
   const rejectedInstall = runInstaller();
@@ -118,6 +134,59 @@ function runInstaller() {
     env: installerEnvironment,
     encoding: 'utf8'
   });
+}
+
+function testInteractiveDownloadConfiguration() {
+  const fakeBinDirectory = path.join(testRoot, 'fake-bin');
+  const fakeCurlPath = path.join(fakeBinDirectory, 'curl');
+  const curlLogPath = path.join(testRoot, 'curl-arguments.log');
+  fs.mkdirSync(fakeBinDirectory, { recursive: true });
+  fs.writeFileSync(fakeCurlPath, `#!/usr/bin/env bash
+set -eu
+printf '%s\\n' "$@" >> "$REMOTE_CODEX_TEST_CURL_LOG"
+remote_codex_destination=''
+remote_codex_url=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output)
+      remote_codex_destination="$2"
+      shift 2
+      ;;
+    *)
+      remote_codex_url="$1"
+      shift
+      ;;
+  esac
+done
+cp "$REMOTE_CODEX_TEST_RELEASE_DIR/\${remote_codex_url##*/}" "$remote_codex_destination"
+`, { mode: 0o755 });
+
+  const result = spawnSync('bash', ['install.sh', '--version', version, '--no-desktop'], {
+    cwd: projectRoot,
+    env: {
+      ...installerEnvironment,
+      PATH: `${fakeBinDirectory}:${process.env.PATH}`,
+      REMOTE_CODEX_DOWNLOAD_BASE: 'https://downloads.example.test/remote-codex',
+      REMOTE_CODEX_PROGRESS: 'always',
+      REMOTE_CODEX_TEST_CURL_LOG: curlLogPath,
+      REMOTE_CODEX_TEST_RELEASE_DIR: releaseDirectory
+    },
+    encoding: 'utf8'
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal((result.stdout.match(/Progress:/g) || []).length, 2);
+
+  const curlArguments = fs.readFileSync(curlLogPath, 'utf8');
+  for (const expectedArgument of [
+    '--retry',
+    '--retry-delay',
+    '--connect-timeout',
+    '--speed-limit',
+    '--speed-time'
+  ]) {
+    assert.ok(curlArguments.includes(expectedArgument), `missing curl option: ${expectedArgument}`);
+  }
+  assert.equal(curlArguments.includes('--silent'), false);
 }
 
 function assertInstallation() {

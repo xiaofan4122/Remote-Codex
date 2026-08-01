@@ -2,6 +2,7 @@ node_modules/
 dist/
 build/CMakeFiles/
 /current-screen.png
+/artifacts/
 config.json
 *.local.json
 *.log
