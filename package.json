@@ -59,6 +59,7 @@
     "test:terminal-capture": "node scripts/test-terminal-capture.js",
     "test:terminal-key-input": "node scripts/test-terminal-key-input.js",
     "test:linux-installer": "node scripts/test-linux-installer.js",
+    "test:development-toggle": "node scripts/test-development-version-toggle.js",
     "test:app-updates": "node scripts/test-app-updates.js",
     "test:single-instance": "node scripts/test-feishu-instance-coordinator.js",
     "test:multi-instance": "node scripts/test-feishu-instance-coordinator.js",
