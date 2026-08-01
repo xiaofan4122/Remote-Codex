@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 const defaultConfig = {
   ui: {
@@ -353,11 +354,12 @@ function stripRuntimeFields(config) {
 function saveConfig(config, options = {}) {
   const configPath = options.configPath || config.configPath || getConfigPath();
   const payload = stripRuntimeFields(config);
+  const temporary = `${configPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(`${configPath}.tmp`, `${JSON.stringify(payload, null, 2)}\n`, {
+  fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, {
     mode: 0o600
   });
-  fs.renameSync(`${configPath}.tmp`, configPath);
+  fs.renameSync(temporary, configPath);
   fs.chmodSync(configPath, 0o600);
   return loadConfig({ configPath });
 }

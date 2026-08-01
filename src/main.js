@@ -17,7 +17,7 @@ const { parseLaunchOptions, buildCodexArgs } = require('./launchOptions');
 const { buildResumeHint } = require('./resumeHint');
 const { buildRemoteInputNotice } = require('./remoteVisualNotice');
 const { installBundledSkill } = require('./bundledSkillInstaller');
-const { configureSingleInstance } = require('./singleInstanceCoordinator');
+const { FeishuInstanceCoordinator } = require('./feishuInstanceCoordinator');
 const {
   connectOrReconnectFeishu,
   resetFeishuConnection
@@ -36,6 +36,11 @@ let remoteController;
 let pluginManager;
 let feishuRegistrationManager;
 let appUpdateManager;
+let feishuInstanceCoordinator;
+let feishuInstanceState;
+let pendingFeishuInstanceState;
+let feishuOwnershipReconcilePromise = null;
+let feishuLeaseConfigLoaded = false;
 let signalShutdownStarted = false;
 const localTerminalInputTracker = new LocalTerminalInputTracker();
 const launchOptions = parseLaunchOptions(process.argv, process.env, {
@@ -69,14 +74,7 @@ const MAIN_I18N = {
 };
 
 const logger = createLogger();
-const hasSingleInstanceLock = configureSingleInstance({
-  app,
-  getMainWindow: () => mainWindow,
-  logger
-});
-if (hasSingleInstanceLock) {
-  installPackagedSkill();
-}
+installPackagedSkill();
 const diagnosticOutputRecorder = createDiagnosticOutputRecorder(logger);
 const manager = new CodexSessionManager({
   config,
@@ -178,11 +176,134 @@ async function restartPlugins() {
   manager.updateConfig(config);
   execRunner.updateConfig(config);
   appServerRunner.updateConfig(config);
-  await pluginManager?.restart(config);
+  await pluginManager?.restart(config, {
+    shouldStart: ({ id }) => (
+      id !== 'feishu' || (
+        feishuInstanceCoordinator?.isSelected() &&
+        feishuInstanceCoordinator.holdsConnectionLease()
+      )
+    )
+  });
   if (previousActiveChatId) {
     const nextFeishu = pluginManager?.getInstance('feishu');
     if (nextFeishu) nextFeishu.activeChatId = previousActiveChatId;
   }
+}
+
+function createFeishuInstanceCoordinator() {
+  feishuInstanceCoordinator = new FeishuInstanceCoordinator({
+    directory: path.join(app.getPath('userData'), 'instance-coordination'),
+    logger,
+    onState: handleFeishuInstanceState
+  });
+  feishuInstanceCoordinator.start();
+}
+
+function handleFeishuInstanceState(state) {
+  feishuInstanceState = state;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('feishu-window:state', state);
+  }
+  scheduleFeishuOwnershipReconcile(state);
+}
+
+function scheduleFeishuOwnershipReconcile(state = feishuInstanceState) {
+  pendingFeishuInstanceState = state;
+  if (feishuOwnershipReconcilePromise) return feishuOwnershipReconcilePromise;
+
+  feishuOwnershipReconcilePromise = (async () => {
+    while (pendingFeishuInstanceState) {
+      const nextState = pendingFeishuInstanceState;
+      pendingFeishuInstanceState = null;
+      await reconcileFeishuOwnership(nextState);
+    }
+  })().catch((error) => {
+    logger.error('Failed to switch Feishu window ownership', {
+      instanceId: state?.instanceId,
+      selected: state?.selected,
+      error: error.message
+    });
+  }).finally(() => {
+    feishuOwnershipReconcilePromise = null;
+    if (pendingFeishuInstanceState) {
+      scheduleFeishuOwnershipReconcile(pendingFeishuInstanceState);
+    }
+  });
+
+  return feishuOwnershipReconcilePromise;
+}
+
+async function reconcileFeishuOwnership(state) {
+  if (!feishuInstanceCoordinator || !pluginManager) return;
+
+  if (!state?.selected) {
+    if (!feishuInstanceCoordinator.holdsConnectionLease()) return;
+    feishuRegistrationManager?.cancel();
+    await pluginManager.stop('feishu');
+    feishuInstanceCoordinator.releaseConnectionLease();
+    feishuLeaseConfigLoaded = false;
+    logger.event?.('feishu.instance.disconnected', {
+      instanceId: state?.instanceId,
+      instanceCount: state?.instanceCount
+    });
+    return;
+  }
+
+  if (!feishuInstanceCoordinator.tryAcquireConnectionLease()) return;
+  if (!feishuInstanceCoordinator.isSelected()) {
+    feishuInstanceCoordinator.releaseConnectionLease();
+    return;
+  }
+
+  if (pluginManager.getInstance('feishu')) return;
+  if (!feishuLeaseConfigLoaded) {
+    refreshRuntimeConfigFromDisk();
+    feishuLeaseConfigLoaded = true;
+  }
+  if (!config.plugins?.feishu?.enabled) return;
+
+  try {
+    await pluginManager.start('feishu');
+    logger.event?.('feishu.instance.connected', {
+      instanceId: state.instanceId,
+      instanceCount: state.instanceCount
+    });
+  } catch (error) {
+    logger.error('Failed to start Feishu for the selected window', {
+      instanceId: state.instanceId,
+      error: error.message
+    });
+  }
+}
+
+function refreshRuntimeConfigFromDisk() {
+  const nextConfig = loadConfig({ configPath: config.configPath });
+  config = nextConfig;
+  appUpdateManager?.updateConfig(config);
+  remoteController?.updateConfig(config);
+  manager.updateConfig(config);
+  execRunner.updateConfig(config);
+  appServerRunner.updateConfig(config);
+  if (pluginManager) pluginManager.config = config;
+  mainWindow?.webContents.send('config:updated', config);
+  return config;
+}
+
+async function selectCurrentWindowForFeishu(selected) {
+  if (!feishuInstanceCoordinator) return null;
+  const state = feishuInstanceCoordinator.setSelected(selected);
+  await scheduleFeishuOwnershipReconcile(state);
+  return feishuInstanceCoordinator.refresh();
+}
+
+async function waitForCurrentWindowFeishuLease(timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && feishuInstanceCoordinator?.isSelected()) {
+    await scheduleFeishuOwnershipReconcile(feishuInstanceCoordinator.refresh());
+    if (feishuInstanceCoordinator.holdsConnectionLease()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return feishuInstanceCoordinator?.holdsConnectionLease() || false;
 }
 
 function cloneConfig(value = config) {
@@ -374,17 +495,15 @@ function startCodex(cwd = config.codex.defaultCwd) {
   return session;
 }
 
-if (!hasSingleInstanceLock) {
-  // configureSingleInstance already requested shutdown before plugin startup.
-} else {
-  app.whenReady().then(() => {
-    createPluginRuntime();
-    createWindow();
-    appUpdateManager = createAppUpdateManager({ app, config, logger });
-    appUpdateManager.subscribe((status) => {
-      if (!mainWindow || mainWindow.isDestroyed()) return;
-      mainWindow.webContents.send('updates:status', status);
-    });
+app.whenReady().then(() => {
+  createPluginRuntime();
+  createWindow();
+  appUpdateManager = createAppUpdateManager({ app, config, logger });
+  appUpdateManager.subscribe((status) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send('updates:status', status);
+  });
+  createFeishuInstanceCoordinator();
 
   ipcMain.handle('session:start', (_event, cwd) => {
     startCodex(cwd || config.codex.defaultCwd);
@@ -448,7 +567,17 @@ if (!hasSingleInstanceLock) {
     return config;
   });
 
+  ipcMain.handle('feishu-window:get-state', () => {
+    return feishuInstanceCoordinator?.refresh() || feishuInstanceState || null;
+  });
+
+  ipcMain.handle('feishu-window:set-selected', async (_event, selected) => {
+    return selectCurrentWindowForFeishu(Boolean(selected));
+  });
+
   ipcMain.handle('feishu:connect-start', async (_event, nextConfig) => {
+    await selectCurrentWindowForFeishu(true);
+    await waitForCurrentWindowFeishuLease();
     if (nextConfig && typeof nextConfig === 'object') {
       const nextFeishu = nextConfig.plugins?.feishu;
       if (nextFeishu?.appId && nextFeishu?.appSecret) {
@@ -487,6 +616,9 @@ if (!hasSingleInstanceLock) {
     if (confirmation.response !== 1) {
       return { status: 'idle', canceled: true };
     }
+
+    await selectCurrentWindowForFeishu(true);
+    await waitForCurrentWindowFeishuLease();
 
     const result = await resetFeishuConnection({
       config,
@@ -581,16 +713,17 @@ if (!hasSingleInstanceLock) {
     runVisualSmokeTestIfRequested();
   });
 
-  pluginManager.startEnabled().catch((error) => {
+  pluginManager.startEnabled({
+    shouldStart: ({ id }) => id !== 'feishu'
+  }).catch((error) => {
     console.error('Failed to start plugins:', error);
     logger.error('Failed to start plugins', { error: error.message });
   });
 
-    app.on('activate', () => {
-      if (!mainWindow || mainWindow.isDestroyed()) createWindow();
-    });
+  app.on('activate', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) createWindow();
   });
-}
+});
 
 app.on('before-quit', () => {
   appUpdateManager?.stop();
@@ -599,6 +732,7 @@ app.on('before-quit', () => {
     console.error('Failed to stop plugins:', error);
     logger.error('Failed to stop plugins', { error: error.message });
   });
+  feishuInstanceCoordinator?.stop({ releaseLease: false });
   rolloutReader.stopAll();
   manager.killAll();
   appServerRunner.stop();

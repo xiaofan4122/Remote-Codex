@@ -30,14 +30,25 @@ for (const id of ['automaticUpdatesEnabled', 'updateStatus', 'updateAction']) {
   assert.equal(count(html, `id="${id}"`), 1, `${id} must appear once in settings HTML`);
   assert.match(renderer, new RegExp(id), `${id} must be wired in renderer.js`);
 }
+for (const id of ['feishuWindowTarget', 'feishuWindowSelected']) {
+  assert.equal(count(html, `id="${id}"`), 1, `${id} must appear once in toolbar HTML`);
+  assert.match(renderer, new RegExp(id), `${id} must be wired in renderer.js`);
+}
 assert.match(preload, /checkForUpdates:.*updates:check/);
 assert.match(preload, /downloadUpdate:.*updates:download/);
 assert.match(preload, /installUpdate:.*updates:install/);
 assert.match(preload, /setUiLanguage:.*ui:set-language/);
 assert.match(preload, /resetFeishuConnection:.*feishu:connection-reset/);
+assert.match(preload, /getFeishuWindowState:.*feishu-window:get-state/);
+assert.match(preload, /setFeishuWindowSelected:.*feishu-window:set-selected/s);
+assert.match(preload, /onFeishuWindowState/);
 assert.match(main, /ipcMain\.handle\('updates:check'/);
 assert.match(main, /ipcMain\.handle\('updates:download'/);
 assert.match(main, /ipcMain\.handle\('updates:install'/);
+assert.match(main, /ipcMain\.handle\('feishu-window:get-state'/);
+assert.match(main, /ipcMain\.handle\('feishu-window:set-selected'/);
+assert.doesNotMatch(main, /requestSingleInstanceLock|second-instance/);
+assert.match(styles, /\.feishu-window-target\[hidden\]/);
 const languageHandler = main.slice(
   main.indexOf("ipcMain.handle('ui:set-language'"),
   main.indexOf("ipcMain.handle('ui:onboarding-complete'")

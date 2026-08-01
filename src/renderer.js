@@ -7,6 +7,8 @@ const cwdElement = document.getElementById('cwd');
 const chooseDirButton = document.getElementById('chooseDir');
 const restartButton = document.getElementById('restart');
 const settingsButton = document.getElementById('settings');
+const feishuWindowTarget = document.getElementById('feishuWindowTarget');
+const feishuWindowSelectedCheckbox = document.getElementById('feishuWindowSelected');
 const settingsPanel = document.getElementById('settingsPanel');
 const settingsForm = document.getElementById('settingsForm');
 const closeSettingsButton = document.getElementById('closeSettings');
@@ -44,6 +46,7 @@ let currentCwd = null;
 let currentConfig = null;
 let currentLanguage = 'zh-CN';
 let currentFeishuStatus = { status: 'idle' };
+let currentFeishuWindowState = null;
 let currentUpdateStatus = null;
 let feishuConnectUrl = '';
 let fitFrame = null;
@@ -66,6 +69,8 @@ const I18N = {
     openProject: '打开项目',
     restartCodex: '重启 Codex',
     settings: '设置',
+    connectThisWindowToFeishu: '连接此窗口到飞书',
+    feishuWindowSwitchFailed: '切换飞书连接窗口失败：{error}',
     close: '关闭',
     interface: '界面',
     language: '语言',
@@ -140,6 +145,8 @@ const I18N = {
     openProject: 'Open Project',
     restartCodex: 'Restart Codex',
     settings: 'Settings',
+    connectThisWindowToFeishu: 'Connect this window to Feishu',
+    feishuWindowSwitchFailed: 'Failed to switch the Feishu window: {error}',
     close: 'Close',
     interface: 'Interface',
     language: 'Language',
@@ -503,6 +510,9 @@ window.codexShell.onFeishuConnectStatus((status) => {
     }
   }
 });
+window.codexShell.onFeishuWindowState((state) => {
+  renderFeishuWindowState(state);
+});
 window.codexShell.onUpdateStatus((status) => {
   currentUpdateStatus = status;
   renderUpdateStatus(status);
@@ -758,6 +768,24 @@ settingsButton.addEventListener('click', async () => {
   await openSettingsPanel({ advanceOnboarding: onboardingStage === 'settings' });
 });
 
+feishuWindowSelectedCheckbox.addEventListener('change', async () => {
+  const selected = feishuWindowSelectedCheckbox.checked;
+  feishuWindowSelectedCheckbox.disabled = true;
+  feishuWindowTarget.classList.add('is-pending');
+  try {
+    const state = await window.codexShell.setFeishuWindowSelected(selected);
+    renderFeishuWindowState(state);
+  } catch (error) {
+    renderFeishuWindowState(currentFeishuWindowState);
+    setSettingsStatus(t('feishuWindowSwitchFailed', {
+      error: error.message || 'Unknown error'
+    }));
+  } finally {
+    feishuWindowSelectedCheckbox.disabled = false;
+    feishuWindowTarget.classList.remove('is-pending');
+  }
+});
+
 closeSettingsButton.addEventListener('click', () => {
   closeSettingsPanel();
 });
@@ -914,6 +942,12 @@ window.codexShell.getConfig().then((config) => {
   initializeOnboarding(config);
 }).catch(() => {
   setLanguage(currentLanguage);
+});
+
+window.codexShell.getFeishuWindowState().then((state) => {
+  renderFeishuWindowState(state);
+}).catch(() => {
+  renderFeishuWindowState(null);
 });
 
 async function openSettingsPanel({ advanceOnboarding = false } = {}) {
@@ -1216,6 +1250,16 @@ function renderFeishuConnectStatus(status = { status: 'idle' }) {
   if (status.status && status.status !== 'idle') {
     feishuConnectState.textContent = message;
   }
+}
+
+function renderFeishuWindowState(state) {
+  if (!state) {
+    feishuWindowTarget.hidden = true;
+    return;
+  }
+  currentFeishuWindowState = state;
+  feishuWindowTarget.hidden = state.multiple !== true;
+  feishuWindowSelectedCheckbox.checked = state.selected === true;
 }
 
 function maskValue(value) {

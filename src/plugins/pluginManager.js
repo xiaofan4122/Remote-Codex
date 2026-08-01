@@ -38,10 +38,10 @@ class PluginManager {
     return this.config.plugins?.[pluginId] || {};
   }
 
-  async startEnabled() {
+  async startEnabled({ shouldStart = () => true } = {}) {
     for (const plugin of this.registry.values()) {
       const pluginConfig = this.getPluginConfig(plugin.id);
-      if (!pluginConfig.enabled) continue;
+      if (!pluginConfig.enabled || !shouldStart(plugin)) continue;
       await this.start(plugin.id);
     }
   }
@@ -80,10 +80,18 @@ class PluginManager {
     }
   }
 
-  async restart(config) {
+  async stop(pluginId) {
+    const instance = this.instances.get(pluginId);
+    if (!instance) return false;
+    this.instances.delete(pluginId);
+    await instance.stop?.();
+    return true;
+  }
+
+  async restart(config, options = {}) {
     await this.stopAll();
     this.config = config;
-    await this.startEnabled();
+    await this.startEnabled(options);
   }
 
   async invoke(pluginId, action, payload = {}) {

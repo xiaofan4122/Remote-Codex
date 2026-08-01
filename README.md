@@ -33,6 +33,31 @@ Codex CLI.
   />
 </p>
 
+### One card, updated continuously
+
+Remote progress, actions, and the final answer stay in one live-updating card.
+
+<p align="center">
+  <img
+    src="docs/assets/demos/single-card-updates.gif"
+    alt="Remote Codex continuously updating a single Feishu card"
+    width="900"
+  />
+</p>
+
+### LaTeX, rendered automatically
+
+Formula regions are recognized locally and embedded into the Feishu card as
+readable rendered images.
+
+<p align="center">
+  <img
+    src="docs/assets/demos/latex-rendering.gif"
+    alt="Remote Codex rendering LaTeX formulas in a Feishu card"
+    width="900"
+  />
+</p>
+
 ### Native Codex controls, available remotely
 
 Selected native Codex pages are mapped to interactive Feishu cards. Their
@@ -63,36 +88,21 @@ Requirements:
 
 - A Linux distribution with glibc 2.31 or newer, such as Ubuntu 20.04+.
 - The native `codex` command available on `PATH` and already signed in.
-- `sha256sum` for release verification.
 
 ### Ubuntu and Debian
 
-Download the package and checksum matching `dpkg --print-architecture`:
+Download the package matching `dpkg --print-architecture`:
 
-| Architecture | Package | Checksum |
-| --- | --- | --- |
-| `amd64` | [remote-codex-linux-amd64.deb](https://github.com/xiaofan4122/Remote-Codex/releases/latest/download/remote-codex-linux-amd64.deb) | [SHA-256](https://github.com/xiaofan4122/Remote-Codex/releases/latest/download/remote-codex-linux-amd64.deb.sha256) |
-| `arm64` | [remote-codex-linux-arm64.deb](https://github.com/xiaofan4122/Remote-Codex/releases/latest/download/remote-codex-linux-arm64.deb) | [SHA-256](https://github.com/xiaofan4122/Remote-Codex/releases/latest/download/remote-codex-linux-arm64.deb.sha256) |
+| Architecture | Download |
+| --- | --- |
+| `amd64` | [remote-codex-linux-amd64.deb](https://github.com/xiaofan4122/Remote-Codex/releases/latest/download/remote-codex-linux-amd64.deb) |
+| `arm64` | [remote-codex-linux-arm64.deb](https://github.com/xiaofan4122/Remote-Codex/releases/latest/download/remote-codex-linux-arm64.deb) |
 
-Verify and install, using the ARM64 filename when appropriate:
+Install the downloaded package, using the ARM64 filename when appropriate:
 
 ```bash
-sha256sum --check remote-codex-linux-amd64.deb.sha256
 sudo apt install ./remote-codex-linux-amd64.deb
 ```
-
-### Other Linux distributions or installation without sudo
-
-```bash
-curl -fL --retry 5 --retry-delay 2 \
-  https://github.com/xiaofan4122/Remote-Codex/releases/latest/download/install.sh \
-  --output remote-codex-install.sh
-less remote-codex-install.sh
-bash remote-codex-install.sh
-```
-
-The installer verifies the portable archive before activating it under
-`~/.local/opt/remote-codex`.
 
 Start Remote Codex from a project directory:
 
@@ -106,11 +116,7 @@ Updates can be checked and installed from **Settings → Software Updates**.
 To uninstall:
 
 ```bash
-# Debian package
 sudo apt remove remote-codex
-
-# User-local installation
-remote-codex-uninstall
 ```
 
 See all packages on the [GitHub Releases page](https://github.com/xiaofan4122/Remote-Codex/releases/latest).
@@ -131,6 +137,11 @@ Tasks entered in the desktop client stay local by default. Enable **Send new
 desktop tasks to Feishu** in Settings to forward newly submitted prompts and
 their rollout replies to Feishu. File delivery remains available for desktop
 tasks when this forwarding option is off.
+
+Remote Codex can run multiple desktop windows at once. When more than one is
+open, the toolbar shows **Connect this window to Feishu**. The newest window is
+selected by default; selecting another window transfers the single Feishu
+connection to that window and its Codex session.
 
 ## How It Works
 

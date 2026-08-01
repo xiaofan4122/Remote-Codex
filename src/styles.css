@@ -80,9 +80,47 @@ p {
 
 .actions {
   display: flex;
+  align-items: center;
   min-width: max-content;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.feishu-window-target {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid #3a4656;
+  border-radius: 6px;
+  background: #14191f;
+  color: #cbd5e1;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.feishu-window-target[hidden] {
+  display: none;
+}
+
+.feishu-window-target:has(input:checked) {
+  border-color: #3b82f6;
+  background: #1e3148;
+  color: #dbeafe;
+}
+
+.feishu-window-target input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+}
+
+.feishu-window-target.is-pending {
+  cursor: wait;
+  opacity: 0.72;
 }
 
 button {

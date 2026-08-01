@@ -7,6 +7,10 @@ contextBridge.exposeInMainWorld('codexShell', {
   saveConfig: (config) => ipcRenderer.invoke('config:save', config),
   setUiLanguage: (language) => ipcRenderer.invoke('ui:set-language', language),
   completeOnboarding: (reason) => ipcRenderer.invoke('ui:onboarding-complete', reason),
+  getFeishuWindowState: () => ipcRenderer.invoke('feishu-window:get-state'),
+  setFeishuWindowSelected: (selected) => (
+    ipcRenderer.invoke('feishu-window:set-selected', selected)
+  ),
   startFeishuConnect: (config) => ipcRenderer.invoke('feishu:connect-start', config),
   resetFeishuConnection: () => ipcRenderer.invoke('feishu:connection-reset'),
   cancelFeishuConnect: () => ipcRenderer.invoke('feishu:connect-cancel'),
@@ -39,6 +43,11 @@ contextBridge.exposeInMainWorld('codexShell', {
     const listener = (_event, status) => callback(status);
     ipcRenderer.on('feishu:connect-status', listener);
     return () => ipcRenderer.removeListener('feishu:connect-status', listener);
+  },
+  onFeishuWindowState: (callback) => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('feishu-window:state', listener);
+    return () => ipcRenderer.removeListener('feishu-window:state', listener);
   },
   onUpdateStatus: (callback) => {
     const listener = (_event, status) => callback(status);
