@@ -72,6 +72,9 @@ class FeishuPlugin {
     this.latexImageKeys = new Map();
     this.connectionWaiters = new Set();
     this.lastConnectionError = '';
+    this.activeChatId = String(
+      this.pluginConfig.defaultChatId || this.pluginConfig.allowedChatIds?.[0] || ''
+    ).trim();
   }
 
   async start() {
@@ -248,6 +251,7 @@ class FeishuPlugin {
 
     const text = this.normalizeCommandText(message);
     if (!text) return;
+    if (message.chatId) this.activeChatId = message.chatId;
     this.logger.event?.('feishu.message.accepted', {
       chatId: message.chatId,
       messageId: message.messageId,
@@ -345,29 +349,139 @@ class FeishuPlugin {
   }
 
   async dispatchRemoteMessage(message, text) {
-    await this.services.remoteController.handleMessage({
-      pluginId: 'feishu',
+    await this.services.remoteController.handleMessage(this.buildRemoteMessageBridge({
+      message,
+      text,
       conversationId: message.chatId || message.senderOpenId,
       userId: message.senderOpenId,
+      receiveId: message.chatId,
+      receiveIdType: 'chat_id'
+    }));
+  }
+
+  observeLocalTurn({ session, prompt, startedAt = Date.now() } = {}) {
+    const text = String(prompt || '').trim();
+    if (!session || !text) return false;
+    const destination = this.resolveLocalTurnDestination();
+    if (!destination) {
+      this.logger.event?.('feishu.local_turn.skipped', {
+        reason: 'missing_delivery_destination',
+        sessionId: session.id || '',
+        promptChars: text.length
+      });
+      return false;
+    }
+
+    const syncReplyText = this.pluginConfig.syncLocalTurns === true;
+    const taskNoticeReady = syncReplyText
+      ? this.sendText({
+        receiveId: destination.receiveId,
+        receiveIdType: destination.receiveIdType,
+        text: `Remote Codex 客户端任务\n\n${text}`
+      }).catch((error) => {
+        this.logger.warn?.('Feishu local task notice failed:', error.message);
+      })
+      : Promise.resolve();
+    const message = this.buildRemoteMessageBridge({
+      message: null,
+      text,
+      conversationId: destination.conversationId,
+      userId: 'local-desktop',
+      receiveId: destination.receiveId,
+      receiveIdType: destination.receiveIdType,
+      beforeOutput: taskNoticeReady
+    });
+    message.inputSource = 'local';
+    message.suppressReplyText = !syncReplyText;
+    const observed = this.services.remoteController.observeLocalTurn(message, {
+      session,
+      prompt: text,
+      startedAt,
+      matchNextPrompt: true
+    });
+    this.logger.event?.('feishu.local_turn.observed', {
+      conversationId: destination.conversationId,
+      receiveIdType: destination.receiveIdType,
+      sessionId: session.id || '',
+      syncReplyText,
+      observed: Boolean(observed),
+      promptChars: text.length
+    });
+    return Boolean(observed);
+  }
+
+  resolveLocalTurnDestination() {
+    const activeChatId = String(this.activeChatId || '').trim();
+    if (activeChatId) {
+      return {
+        receiveId: activeChatId,
+        receiveIdType: 'chat_id',
+        conversationId: activeChatId
+      };
+    }
+    const openId = String(
+      this.pluginConfig.authorizedOpenId || this.pluginConfig.allowedOpenIds?.[0] || ''
+    ).trim();
+    if (!openId) return null;
+    return {
+      receiveId: openId,
+      receiveIdType: 'open_id',
+      conversationId: `open_id:${openId}`
+    };
+  }
+
+  buildRemoteMessageBridge({
+    message,
+    text,
+    conversationId,
+    userId,
+    receiveId,
+    receiveIdType = 'chat_id',
+    beforeOutput = Promise.resolve()
+  }) {
+    return {
+      pluginId: 'feishu',
+      conversationId,
+      userId,
       text,
       reply: async (replyText) => {
+        await beforeOutput;
         await this.sendReply({
-          receiveId: message.chatId,
-          receiveIdType: 'chat_id',
+          receiveId,
+          receiveIdType,
           text: replyText
         });
       },
       replyPanel: async (panel) => {
-        await this.sendPanel({
-          receiveId: message.chatId,
-          receiveIdType: 'chat_id',
+        await beforeOutput;
+        return this.sendPanel({
+          receiveId,
+          receiveIdType,
           panel
         });
       },
+      createApprovalPanel: async ({ panel, callId } = {}) => {
+        await beforeOutput;
+        return this.sendApprovalPanel({
+          receiveId,
+          receiveIdType,
+          panel,
+          callId
+        });
+      },
+      closeApprovalPanel: async ({ handle, callId, completed, reason } = {}) => {
+        return this.closeApprovalPanel({
+          handle,
+          callId,
+          completed,
+          reason
+        });
+      },
       replySegment: async ({ text: segmentText, final = false, title = '' } = {}) => {
+        await beforeOutput;
         await this.sendReply({
-          receiveId: message.chatId,
-          receiveIdType: 'chat_id',
+          receiveId,
+          receiveIdType,
           text: segmentText,
           template: final ? 'green' : 'blue',
           title: title || (final ? 'Remote Codex 完成' : 'Remote Codex 进度')
@@ -376,8 +490,8 @@ class FeishuPlugin {
       sendFile: this.pluginConfig.mode === 'long_connection'
         ? async ({ path: filePath, name, size }) => {
           await this.sendFile({
-            receiveId: message.chatId,
-            receiveIdType: 'chat_id',
+            receiveId,
+            receiveIdType,
             filePath,
             fileName: name,
             size
@@ -385,12 +499,13 @@ class FeishuPlugin {
         }
         : undefined,
       onTurnFinished: async () => {
-        await this.addDoneReaction(message);
+        if (message?.messageId) await this.addDoneReaction(message);
       },
       createReplyStream: async ({ title, initialText, controlMode } = {}) => {
+        await beforeOutput;
         if (!this.pluginConfig.streaming) {
           this.logger.event?.('feishu.stream.skipped', {
-            chatId: message.chatId,
+            chatId: receiveId,
             reason: 'streaming_disabled',
             controlMode
           });
@@ -398,7 +513,7 @@ class FeishuPlugin {
         }
         if (this.pluginConfig.mode !== 'long_connection') {
           this.logger.event?.('feishu.stream.skipped', {
-            chatId: message.chatId,
+            chatId: receiveId,
             reason: 'not_long_connection',
             mode: this.pluginConfig.mode,
             controlMode
@@ -406,14 +521,14 @@ class FeishuPlugin {
           return null;
         }
         return this.createReplyStream({
-          receiveId: message.chatId,
-          receiveIdType: 'chat_id',
+          receiveId,
+          receiveIdType,
           title: title || 'Remote Codex',
           initialText: initialText === undefined ? 'Generating...' : initialText,
           controlMode
         });
       }
-    });
+    };
   }
 
   async handleRemoteDispatchError(message, error) {
@@ -541,8 +656,9 @@ class FeishuPlugin {
       return;
     }
 
+    if (action.chatId) this.activeChatId = action.chatId;
+
     const command = `/${action.remoteAction}`;
-    const approvalAction = isApprovalCardAction(action.remoteAction);
     const hasReplyStream = Boolean(
       action.messageId && this.replyStreamsByMessageId.has(action.messageId)
     );
@@ -626,9 +742,6 @@ class FeishuPlugin {
           });
         }
       });
-      if (approvalAction && !hasReplyStream) {
-        await this.dismissStaticApprovalCard(action);
-      }
     } catch (error) {
       this.logger.warn?.('Feishu card action handling failed:', error.message);
       if (action.chatId) {
@@ -751,8 +864,11 @@ class FeishuPlugin {
     }
     const stream = this.replyStreamsByMessageId.get(action.messageId);
     if (stream) {
+      const expectedPanelRevision = stream.panelRevision;
       const showFeedback = () => {
-        return stream.showActionFeedback(action.remoteAction, action.page).catch((error) => {
+        return stream.showActionFeedback(action.remoteAction, action.page, {
+          expectedPanelRevision
+        }).catch((error) => {
           this.logger.warn?.('Feishu stream action feedback failed', {
             error: String(error?.message || error || 'Unknown error'),
             code: error?.code || null,
@@ -800,8 +916,8 @@ class FeishuPlugin {
     this.logger.event?.('feishu.card.patched', { messageId });
   }
 
-  async dismissStaticApprovalCard(action) {
-    if (!action.messageId || this.pluginConfig.mode === 'custom_webhook') return;
+  async deleteMessageCard({ messageId, callId = '', reason = '' } = {}) {
+    if (!messageId || this.pluginConfig.mode === 'custom_webhook') return false;
     const client = this.client || new (requireLarkSdk().Client)({
       appId: this.pluginConfig.appId,
       appSecret: this.pluginConfig.appSecret
@@ -809,29 +925,24 @@ class FeishuPlugin {
     const api = client.im?.v1?.message || client.im?.message;
     if (!api?.delete) {
       this.logger.event?.('feishu.approval.card.dismiss.skipped', {
-        messageId: action.messageId,
+        messageId,
+        callId,
         reason: 'delete_api_unavailable'
       });
-      return;
+      return false;
     }
-    try {
-      const result = await api.delete({
-        path: { message_id: action.messageId }
-      });
-      if (result?.code) {
-        throw new Error(`Feishu card delete failed: ${result.code} ${result.msg || ''}`.trim());
-      }
-      this.logger.event?.('feishu.approval.card.dismissed', {
-        chatId: action.chatId,
-        messageId: action.messageId,
-        action: action.remoteAction
-      });
-    } catch (error) {
-      this.logger.warn?.('Feishu approval card dismiss failed', {
-        messageId: action.messageId,
-        error: String(error?.message || error || 'Unknown error')
-      });
+    const result = await api.delete({
+      path: { message_id: messageId }
+    });
+    if (result?.code) {
+      throw new Error(`Feishu card delete failed: ${result.code} ${result.msg || ''}`.trim());
     }
+    this.logger.event?.('feishu.approval.card.dismissed', {
+      messageId,
+      callId,
+      reason
+    });
+    return true;
   }
 
   getAuthorizationError(message) {
@@ -1138,12 +1249,94 @@ class FeishuPlugin {
     const fallbackText = panel?.fallbackText || buildPanelFallbackText(enrichedPanel);
 
     try {
-      await this.sendPanelCard({ receiveId, receiveIdType, panel: enrichedPanel });
+      const sent = await this.sendPanelCard({
+        receiveId,
+        receiveIdType,
+        panel: enrichedPanel
+      });
+      return {
+        kind: 'card',
+        messageId: extractCreatedMessageId(sent),
+        dismissible: this.pluginConfig.mode !== 'custom_webhook'
+      };
     } catch (error) {
       await this.applyMissingScopesIfNeeded(error);
       this.logger.warn?.('Feishu panel card send failed, falling back to text:', error.message);
       await this.sendText({ receiveId, receiveIdType, text: fallbackText });
+      return {
+        kind: 'text',
+        messageId: '',
+        dismissible: false
+      };
     }
+  }
+
+  async sendApprovalPanel({
+    receiveId,
+    receiveIdType = 'chat_id',
+    panel,
+    callId = ''
+  }) {
+    const handle = await this.sendPanel({ receiveId, receiveIdType, panel });
+    return {
+      ...handle,
+      callId,
+      receiveId,
+      receiveIdType,
+      panel
+    };
+  }
+
+  async closeApprovalPanel({
+    handle,
+    callId = '',
+    completed = true,
+    reason = 'authorization_completed'
+  } = {}) {
+    if (!handle) return false;
+    const completedPanel = {
+      ...(handle.panel || {}),
+      active: false,
+      completed: Boolean(completed),
+      template: completed ? 'green' : 'grey',
+      message: completed ? '本次授权已完成。' : '本次授权请求已失效。',
+      actions: []
+    };
+
+    if (handle.messageId && this.pluginConfig.mode !== 'custom_webhook') {
+      try {
+        const withdrawn = await this.deleteMessageCard({
+          messageId: handle.messageId,
+          callId,
+          reason
+        });
+        if (withdrawn) return true;
+      } catch (error) {
+        this.logger.warn?.('Feishu approval card dismiss failed', {
+          messageId: handle.messageId,
+          callId,
+          error: String(error?.message || error || 'Unknown error')
+        });
+      }
+      await this.patchMessageCard({
+        messageId: handle.messageId,
+        card: buildPanelCard(completedPanel)
+      }).catch((patchError) => {
+        this.logger.warn?.('Feishu approval card completion patch failed', {
+          messageId: handle.messageId,
+          callId,
+          error: String(patchError?.message || patchError || 'Unknown error')
+        });
+      });
+      return false;
+    }
+
+    await this.sendPanel({
+      receiveId: handle.receiveId,
+      receiveIdType: handle.receiveIdType,
+      panel: completedPanel
+    });
+    return false;
   }
 
   async sendPanelCard({ receiveId, receiveIdType = 'chat_id', panel }) {
@@ -1156,12 +1349,11 @@ class FeishuPlugin {
     });
 
     if (this.pluginConfig.mode === 'custom_webhook') {
-      await sendCustomWebhookCard({
+      return sendCustomWebhookCard({
         webhookUrl: this.pluginConfig.customWebhookUrl,
         secret: this.pluginConfig.customWebhookSecret,
         card
       });
-      return;
     }
 
     if (!receiveId) {
@@ -1173,7 +1365,7 @@ class FeishuPlugin {
       appSecret: this.pluginConfig.appSecret
     });
 
-    await sendAppCard(client, {
+    return sendAppCard(client, {
       receiveId,
       receiveIdType,
       card
@@ -1707,12 +1899,6 @@ const REACTION_EMOJI_ALIASES = new Map([
 
 function shouldDedupeCardAction(action) {
   return ['approve', 'approve_persistent', 'deny', 'enter', 'escape'].includes(
-    String(action || '').toLowerCase()
-  );
-}
-
-function isApprovalCardAction(action) {
-  return ['approve', 'approve_persistent', 'deny'].includes(
     String(action || '').toLowerCase()
   );
 }

@@ -1,6 +1,6 @@
 ---
 name: remote-codex-send-files
-description: Send files created in the current Codex workspace back through Remote Codex to the active Feishu chat. Use when a remote user asks to send, attach, deliver, or download a generated report, archive, image, document, data file, patch, or other workspace artifact.
+description: Send files created in the current Codex workspace through Remote Codex to the active Feishu chat. Use whenever a user asks to send, attach, deliver, or download a generated report, archive, image, document, data file, patch, or other workspace artifact, whether the request came from Feishu or the desktop client.
 ---
 
 # Remote Codex Send Files
@@ -21,6 +21,10 @@ Use an absolute path. Do not wrap the actual directive in a code block, quote, b
 
 Remote Codex removes directive lines from the visible completion card, validates the files, uploads them, and sends Feishu file messages.
 
+This works for tasks submitted from Feishu and for tasks entered directly in
+the Remote Codex desktop client. Desktop task forwarding may remain off;
+file directives are still observed and delivered to the active Feishu chat.
+
 ## Boundaries
 
 - Keep every file inside the current working directory after symlink resolution. A symlink must not escape the workspace.
@@ -28,4 +32,4 @@ Remote Codex removes directive lines from the visible completion card, validates
 - Emit directives only in the final answer, never in progress commentary.
 - Do not emit a directive before the file is completely written.
 - Do not call Feishu APIs, use webhook credentials, or upload the file yourself.
-- Do not claim that delivery succeeded. Remote Codex reports validation or upload failures on the task card.
+- Do not claim that delivery succeeded. Remote Codex handles validation and upload failures; when desktop task forwarding is active, it reports them on the task card.

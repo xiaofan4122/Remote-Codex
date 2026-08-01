@@ -52,6 +52,7 @@ class FeishuReplyStream {
     this.actionFeedbackText = '';
     this.panelActive = false;
     this.panelRestoreText = '';
+    this.panelRevision = 0;
   }
 
   async update(text) {
@@ -72,6 +73,8 @@ class FeishuReplyStream {
 
   async showPanel(panel) {
     if (this.closed) return;
+    const panelRevision = this.panelRevision + 1;
+    this.panelRevision = panelRevision;
     if (this.flushPromise) {
       await this.flushPromise;
     }
@@ -99,7 +102,17 @@ class FeishuReplyStream {
     this.panelActive = true;
   }
 
-  async showActionFeedback(action, page = '') {
+  async showActionFeedback(action, page = '', options = {}) {
+    if (!this.matchesPanelRevision(options.expectedPanelRevision)) {
+      this.logger.event?.('feishu.stream.action_feedback.ignored', {
+        cardId: this.cardId,
+        action,
+        reason: 'panel_changed',
+        expectedPanelRevision: options.expectedPanelRevision,
+        panelRevision: this.panelRevision
+      });
+      return false;
+    }
     const text = buildStreamingActionFeedback({
       action,
       page,
@@ -109,18 +122,21 @@ class FeishuReplyStream {
     });
     this.actionFeedbackText = text;
     if (this.panelActive) {
-      return this.replacePanelWithText(text);
+      return this.replacePanelWithText(text, options);
     }
     return this.setTargetText(text);
   }
 
-  async replacePanelWithText(text) {
+  async replacePanelWithText(text, options = {}) {
     const nextText = String(text || '').trim();
     if (!nextText || this.closed) return;
+    if (!this.matchesPanelRevision(options.expectedPanelRevision)) return false;
     if (this.flushPromise) {
       await this.flushPromise;
     }
+    if (!this.matchesPanelRevision(options.expectedPanelRevision)) return false;
     for (let attempt = 1; attempt <= FEISHU_INTERACTION_RETRY_ATTEMPTS; attempt += 1) {
+      if (!this.matchesPanelRevision(options.expectedPanelRevision)) return false;
       const sequence = this.sequence + 1;
       try {
         await this.plugin.replaceStreamingText({
@@ -151,6 +167,13 @@ class FeishuReplyStream {
     this.lastUpdateAt = this.now();
     this.panelActive = false;
     this.panelRestoreText = '';
+    return true;
+  }
+
+  matchesPanelRevision(expectedPanelRevision) {
+    return expectedPanelRevision === undefined ||
+      expectedPanelRevision === null ||
+      expectedPanelRevision === this.panelRevision;
   }
 
   setCompletionState({ title, template, subtitle } = {}) {

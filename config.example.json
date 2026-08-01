@@ -17,6 +17,7 @@
       "singleCardOutput": true,
       "streaming": true,
       "segmentedOutput": false,
+      "syncLocalTurns": false,
       "fileTransferEnabled": true,
       "fileTransferMaxBytes": 31457280,
       "fileTransferMaxFiles": 5,

@@ -14,6 +14,7 @@ async function main() {
   await testClosedModeRecovery();
   await testPanelInteractionRetryReusesSequence();
   await testApprovalFeedbackPreservesProgressAndResumesStreaming();
+  await testStaleApprovalFeedbackCannotReplaceNextPanel();
   await testRenewalFailureLogging();
   await testLongRunningFinalization();
   process.stdout.write('Feishu reply stream lease tests passed.\n');
@@ -285,6 +286,56 @@ async function testApprovalFeedbackPreservesProgressAndResumesStreaming() {
   assert.equal(stream.currentText, '我正在检查安装脚本和发布配置。\n\n修复已完成，正在运行测试。');
   assert.equal(stream.actionFeedbackText, '');
   assert.equal(stream.panelActive, false);
+}
+
+async function testStaleApprovalFeedbackCannotReplaceNextPanel() {
+  const calls = [];
+  const plugin = createStreamPlugin({
+    async replaceStreamingPanel(payload) {
+      calls.push({ type: 'panel', ...payload });
+      return { sequence: payload.sequence };
+    },
+    async replaceStreamingText(payload) {
+      calls.push({ type: 'replace', ...payload });
+    }
+  });
+  const stream = createStream(plugin);
+
+  await stream.showPanel({
+    kind: 'permission',
+    attached: true,
+    active: true,
+    approval: {
+      reason: 'first approval',
+      command: 'command-one'
+    }
+  });
+  const firstPanelRevision = stream.panelRevision;
+
+  await stream.showPanel({
+    kind: 'permission',
+    attached: true,
+    active: true,
+    approval: {
+      reason: 'second approval',
+      command: 'command-two'
+    }
+  });
+  const applied = await stream.showActionFeedback('approve', '', {
+    expectedPanelRevision: firstPanelRevision
+  });
+
+  assert.equal(applied, false);
+  assert.equal(stream.panelActive, true);
+  assert.match(stream.panelRestoreText, /second approval/);
+  assert.doesNotMatch(stream.panelRestoreText, /first approval/);
+  assert.equal(calls.filter(({ type }) => type === 'replace').length, 0);
+  assert.ok(
+    plugin.events.some(({ name, meta }) => (
+      name === 'feishu.stream.action_feedback.ignored' &&
+      meta.reason === 'panel_changed'
+    ))
+  );
 }
 
 async function testLongRunningFinalization() {

@@ -11,12 +11,14 @@ const feishuPlugin = require('../src/plugins/feishu');
 
 async function main() {
   testSingleCardConfigOverridesLegacyMultiCardValues();
+  await testLocalTurnTextSyncIsOffButFileDeliveryStillWorks();
+  await testLocalTurnTextSyncCanBeEnabled();
   await testSingleCardRolloutEventsProduceExactOrderedUpdates();
   await testFinalFileDirectiveUploadsFileAndStaysOutOfCard();
   await testFileUploadPermissionIsAppliedAndRetried();
   await testInvalidFinalFileDirectiveIsReportedOnOriginalCard();
   await testFileUploadFailureIsReportedOnOriginalCard();
-  await testApprovalSnapshotUpdatesOriginalCardImmediately();
+  await testApprovalUsesDedicatedCardAndWithdrawsOnCompletion();
   await testConsecutiveRolloutApprovalsIgnoreTerminalGarbage();
   await testTerminalRepaintsCannotBecomeRemoteMessages();
   await testResumeGenerationCannotReplayPreviousTurn();
@@ -27,6 +29,72 @@ async function main() {
   await testStreamingBindingFailureClosesOriginalCard();
   await testCodexExitStopsRolloutAndRejectsLateEvents();
   console.log('Feishu rollout JSONL turn simulation tests passed.');
+}
+
+async function testLocalTurnTextSyncIsOffButFileDeliveryStillWorks() {
+  const harness = createHarness({ syncLocalTurns: false });
+  const prompt = '从客户端生成并发送测试文件';
+  const observed = harness.plugin.observeLocalTurn({
+    session: harness.session,
+    prompt,
+    startedAt: Date.now()
+  });
+  assert.equal(observed, true);
+  const turn = harness.rolloutReader.latest();
+  assert.equal(turn.options.matchNextPrompt, true);
+  assert.equal(harness.session.writes.length, 0, '观察器不应重复写入本地 PTY');
+  turn.emit({ ...boundEvent('session-local-file', 'turn-local-file'), prompt });
+  turn.emit({ type: 'turn_started', turnId: 'turn-local-file' });
+  const finalText = [
+    '文件已生成。',
+    `[[remote-codex-file:${__filename}]]`
+  ].join('\n');
+  turn.emit({ type: 'final', text: finalText });
+  turn.emit({ type: 'turn_complete', turnId: 'turn-local-file', finalText });
+  await waitUntil(() => harness.fileMessages.length === 1);
+
+  assert.equal(harness.cardCreates.length, 0);
+  assert.equal(harness.cardMessages.length, 0);
+  assert.equal(harness.closes.length, 0);
+  assert.equal(harness.textFallbacks.length, 0);
+  assert.equal(harness.fileUploads.length, 1);
+  assert.equal(harness.fileMessages[0].params.receive_id_type, 'chat_id');
+  cleanupHarness(harness);
+}
+
+async function testLocalTurnTextSyncCanBeEnabled() {
+  const harness = createHarness({ syncLocalTurns: true });
+  const prompt = '请总结当前项目';
+  const observed = harness.plugin.observeLocalTurn({
+    session: harness.session,
+    prompt,
+    startedAt: Date.now()
+  });
+  assert.equal(observed, true);
+  const turn = harness.rolloutReader.latest();
+  turn.emit({ ...boundEvent('session-local-sync', 'turn-local-sync'), prompt });
+  turn.emit({ type: 'turn_started', turnId: 'turn-local-sync' });
+  turn.emit({ type: 'progress', text: '正在检查项目结构。' });
+  turn.emit({ type: 'final', text: '这是来自客户端任务的最终回复。' });
+  turn.emit({
+    type: 'turn_complete',
+    turnId: 'turn-local-sync',
+    finalText: '这是来自客户端任务的最终回复。'
+  });
+  await waitUntil(() => harness.closes.length === 1);
+
+  assert.equal(harness.textFallbacks.length, 1);
+  assert.equal(
+    harness.textFallbacks[0].text,
+    `Remote Codex 客户端任务\n\n${prompt}`
+  );
+  assert.equal(harness.cardCreates.length, 1);
+  assert.equal(harness.cardMessages.length, 1);
+  assert.equal(
+    streamingCardMarkdown(parseClosedStreamingCard(harness.closes[0])),
+    '这是来自客户端任务的最终回复。'
+  );
+  cleanupHarness(harness);
 }
 
 async function testFinalFileDirectiveUploadsFileAndStaysOutOfCard() {
@@ -423,7 +491,7 @@ async function testTerminalRepaintsCannotBecomeRemoteMessages() {
   cleanupHarness(harness);
 }
 
-async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
+async function testApprovalUsesDedicatedCardAndWithdrawsOnCompletion() {
   const harness = createHarness();
   const prompt = '运行需要确认的命令';
   await harness.plugin.handleReceiveMessage(
@@ -443,16 +511,16 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
     'call-feishu-approval',
     'turn-approval',
     'npm test',
-    'verify the release'
+    'verify the release',
+    { allowPersistent: false }
   ));
 
-  await waitUntil(() => harness.cardReplacements.length === 1);
-  const approvalCard = parseClosedStreamingCard(harness.cardReplacements[0]);
-  assert.equal(approvalCard.schema, '2.0');
+  await waitUntil(() => harness.approvalCardMessages.length === 1);
+  const approvalCard = parseSentCard(harness.approvalCardMessages[0]);
   assert.equal(approvalCard.header.template, 'orange');
-  assert.equal(approvalCard.header.subtitle.content, '等待确认');
-  const approvalMarkdown = streamingCardMarkdown(approvalCard);
-  const approvalActions = streamingCardButtons(approvalCard);
+  assert.equal(approvalCard.header.title.content, 'Remote Codex 权限确认');
+  const approvalMarkdown = staticCardMarkdown(approvalCard);
+  const approvalActions = staticCardButtons(approvalCard);
   assert.match(approvalMarkdown, /verify the release/);
   assert.match(approvalMarkdown, /npm test/);
   assert.doesNotMatch(
@@ -461,39 +529,17 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
   );
   assert.deepEqual(
     approvalActions.map((action) => buttonCallbackValue(action).remote_codex_action),
-    ['approve', 'approve_persistent', 'deny']
-  );
-  const approvalColumnSet = approvalCard.body.elements
-    .find((element) => element.tag === 'column_set');
-  const approvalColumns = approvalColumnSet.columns;
-  assert.equal(approvalColumnSet.flex_mode, 'flow');
-  assert.deepEqual(
-    approvalColumns.map((column) => [column.width, column.weight]),
-    [['weighted', 1], ['weighted', 1], ['weighted', 1]]
-  );
-  assert.deepEqual(
-    approvalActions.map((action) => [action.width, action.size]),
-    [['fill', 'large'], ['fill', 'large'], ['fill', 'large']]
+    ['approve', 'deny']
   );
   const approvalContext = buttonCallbackValue(approvalActions[0]).remote_codex_context;
   assert.match(approvalContext, /^[a-f0-9]{24}$/);
   assert.deepEqual(
     approvalActions.map((action) => buttonCallbackValue(action).remote_codex_context),
-    [approvalContext, approvalContext, approvalContext]
+    [approvalContext, approvalContext]
   );
-  assert.equal(
-    approvalCard.body.elements.some((element) => element.tag === 'action'),
-    false,
-    'CardKit schema 2.0 must not contain the legacy action container'
-  );
-  assert.equal(approvalCard.config.streaming_mode, false);
-  assert.equal(harness.streamingModeUpdates.length, 1);
-  assert.deepEqual(
-    JSON.parse(harness.streamingModeUpdates[0].body.settings),
-    { config: { streaming_mode: false } }
-  );
-  assert.equal(harness.streamingModeUpdates[0].body.sequence, 3);
-  assert.equal(harness.cardReplacements[0].body.sequence, 4);
+  assert.equal(approvalCard.elements.some((element) => element.tag === 'action'), true);
+  assert.equal(harness.cardReplacements.length, 0);
+  assert.equal(harness.streamingModeUpdates.length, 0);
   assert.equal(harness.cardCreates.length, 1);
   assert.equal(harness.cardMessages.length, 1);
   assert.equal(harness.textFallbacks.length, 0);
@@ -511,12 +557,12 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
   });
   await wait(30);
   assert.equal(
-    harness.cardReplacements.length,
+    harness.approvalCardMessages.length,
     1,
-    'terminal approval text must not create or replace a rollout approval card'
+    'terminal approval text must not create another rollout approval card'
   );
   assert.doesNotMatch(
-    streamingCardMarkdown(parseClosedStreamingCard(harness.cardReplacements[0])),
+    staticCardMarkdown(parseSentCard(harness.approvalCardMessages[0])),
     /terminal garbage|corrupted-terminal-command|ngg5WWo/
   );
 
@@ -527,28 +573,20 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
   assert.equal(harness.cardCreates.length, 1);
   assert.equal(harness.cardMessages.length, 1);
 
-  assert.equal(harness.cardReplacements.length, 1);
+  assert.equal(harness.approvalCardMessages.length, 1);
 
   await harness.plugin.handleCardAction(
-    feishuApprovalAction('approve', approvalContext)
+    feishuApprovalAction('approve', approvalContext, 'om_approval_1')
   );
-  await waitUntil(() => harness.cardReplacements.length === 2);
+  await waitUntil(() => harness.approvalCardPatches.length >= 1);
   await waitUntil(() => harness.session.writes.at(-1) === 'y');
-  const submittedCard = parseClosedStreamingCard(harness.cardReplacements[1]);
-  assert.equal(submittedCard.header.template, 'blue');
-  assert.equal(
-    submittedCard.body.elements.some((element) => element.tag === 'action'),
-    false
-  );
-  const submittedMarkdown = streamingCardMarkdown(submittedCard);
-  assert.match(submittedMarkdown, /verify the release/);
-  assert.match(submittedMarkdown, /npm test/);
-  assert.match(submittedMarkdown, /授权状态/);
-  assert.match(submittedMarkdown, /Codex 正在继续执行/);
-  assert.doesNotMatch(submittedMarkdown, /这张卡片已锁定|Options:|Yes|No/);
+  const submittedCard = parsePatchedCard(harness.approvalCardPatches.at(-1));
+  assert.equal(submittedCard.elements.some((element) => element.tag === 'action'), false);
+  assert.match(staticCardMarkdown(submittedCard), /已提交|已发送允许操作|正在继续执行/);
   assert.equal(harness.session.writes.at(-1), 'y');
   assert.equal(harness.cardCreates.length, 1);
   assert.equal(harness.cardMessages.length, 1);
+  assert.equal(harness.approvalCardDeletes.length, 0);
 
   firstTurn.emit({
     type: 'authorization_completed',
@@ -558,6 +596,11 @@ async function testApprovalSnapshotUpdatesOriginalCardImmediately() {
   await waitUntil(() => (
     harness.controller.sessions.get('feishu:oc_chat')?.pendingRolloutApproval === null
   ));
+  await waitUntil(() => harness.approvalCardDeletes.length === 1);
+  assert.equal(
+    harness.approvalCardDeletes[0].path.message_id,
+    'om_approval_1'
+  );
 
   await harness.plugin.handleReceiveMessage(
     feishuMessage('授权后立即追加的任务', 'om_after_approval')
@@ -605,14 +648,26 @@ async function testConsecutiveRolloutApprovalsIgnoreTerminalGarbage() {
     'call-consecutive-first',
     'turn-consecutive',
     'sudo -n /usr/bin/true',
-    'first clean approval'
+    'first clean approval',
+    { allowPersistent: false }
   ));
-  await waitUntil(() => harness.cardReplacements.length === 1);
-  const firstCard = parseClosedStreamingCard(harness.cardReplacements[0]);
-  const firstContext = buttonCallbackValue(streamingCardButtons(firstCard)[0])
+  await waitUntil(() => harness.approvalCardMessages.length === 1);
+  const firstCard = parseSentCard(harness.approvalCardMessages[0]);
+  const firstContext = buttonCallbackValue(staticCardButtons(firstCard)[0])
     .remote_codex_context;
-  assert.match(streamingCardMarkdown(firstCard), /first clean approval/);
-  assert.match(streamingCardMarkdown(firstCard), /sudo -n \/usr\/bin\/true/);
+  assert.match(staticCardMarkdown(firstCard), /first clean approval/);
+  assert.match(staticCardMarkdown(firstCard), /sudo -n \/usr\/bin\/true/);
+  assert.deepEqual(
+    staticCardButtons(firstCard).map(
+      (action) => buttonCallbackValue(action).remote_codex_action
+    ),
+    ['approve', 'deny']
+  );
+
+  await harness.plugin.handleCardAction(
+    feishuApprovalAction('approve', firstContext, 'om_approval_1')
+  );
+  await waitUntil(() => harness.session.writes.at(-1) === 'y');
 
   harness.session.emitOutput({
     data: '•ngg5WWo•Wor•WorkWorki',
@@ -623,27 +678,46 @@ async function testConsecutiveRolloutApprovalsIgnoreTerminalGarbage() {
     ].join('\n')
   });
   await wait(30);
-  assert.equal(harness.cardReplacements.length, 1);
+  assert.equal(harness.approvalCardMessages.length, 1);
 
-  turn.emit({
-    type: 'authorization_completed',
-    callId: 'call-consecutive-first',
-    turnId: 'turn-consecutive'
-  });
   turn.emit(authorizationRequested(
     'call-consecutive-second',
     'turn-consecutive',
     'xdotool windowactivate 42',
     'second clean approval'
   ));
-  await waitUntil(() => harness.cardReplacements.length === 2);
+  await wait(30);
+  assert.equal(
+    harness.approvalCardMessages.length,
+    1,
+    'a queued approval must not become clickable before the native TUI reaches it'
+  );
+  turn.emit({
+    type: 'authorization_completed',
+    callId: 'call-consecutive-first',
+    turnId: 'turn-consecutive'
+  });
+  await waitUntil(() => (
+    harness.approvalCardMessages.length === 2 &&
+    harness.approvalCardDeletes.length === 1
+  ));
 
-  const secondCard = parseClosedStreamingCard(harness.cardReplacements[1]);
-  const secondMarkdown = streamingCardMarkdown(secondCard);
-  const secondContext = buttonCallbackValue(streamingCardButtons(secondCard)[0])
+  await wait(350);
+  assert.equal(harness.cardReplacements.length, 0);
+  assert.equal(harness.approvalCardMessages.length, 2);
+
+  const secondCard = parseSentCard(harness.approvalCardMessages[1]);
+  const secondMarkdown = staticCardMarkdown(secondCard);
+  const secondContext = buttonCallbackValue(staticCardButtons(secondCard)[0])
     .remote_codex_context;
   assert.match(secondMarkdown, /second clean approval/);
   assert.match(secondMarkdown, /xdotool windowactivate 42/);
+  assert.deepEqual(
+    staticCardButtons(secondCard).map(
+      (action) => buttonCallbackValue(action).remote_codex_action
+    ),
+    ['approve', 'approve_persistent', 'deny']
+  );
   assert.doesNotMatch(
     secondMarkdown,
     /first clean approval|corrupted repaint|terminal-corrupted-command|ngg5WWo/
@@ -659,13 +733,23 @@ async function testConsecutiveRolloutApprovalsIgnoreTerminalGarbage() {
     'duplicate request'
   ));
   await wait(30);
-  assert.equal(harness.cardReplacements.length, 2);
+  assert.equal(harness.approvalCardMessages.length, 2);
+
+  await harness.plugin.handleCardAction(
+    feishuApprovalAction('approve', secondContext, 'om_approval_2')
+  );
+  await waitUntil(() => harness.session.writes.filter((input) => input === 'y').length === 2);
 
   turn.emit({
     type: 'authorization_completed',
     callId: 'call-consecutive-second',
     turnId: 'turn-consecutive'
   });
+  await waitUntil(() => harness.approvalCardDeletes.length === 2);
+  assert.deepEqual(
+    harness.approvalCardDeletes.map((entry) => entry.path.message_id),
+    ['om_approval_1', 'om_approval_2']
+  );
   turn.emit({ type: 'final', text: '连续授权任务完成。' });
   turn.emit({
     type: 'turn_complete',
@@ -804,6 +888,9 @@ function createHarness(options = {}) {
   const closes = [];
   const cardReplacements = [];
   const streamingModeUpdates = [];
+  const approvalCardMessages = [];
+  const approvalCardPatches = [];
+  const approvalCardDeletes = [];
   const closeRequests = [];
   const textFallbacks = [];
   let finished = 0;
@@ -859,11 +946,15 @@ function createHarness(options = {}) {
     closes,
     cardReplacements,
     streamingModeUpdates,
+    approvalCardMessages,
+    approvalCardPatches,
+    approvalCardDeletes,
     closeRequests,
     textFallbacks,
     singleCardOutput,
     streaming,
     segmentedOutput,
+    syncLocalTurns: Boolean(options.syncLocalTurns),
     failContentUpdates: Boolean(options.failContentUpdates),
     failFileUpload: Boolean(options.failFileUpload),
     failFilePermissionOnce: Boolean(options.failFilePermissionOnce),
@@ -887,6 +978,9 @@ function createHarness(options = {}) {
     closes,
     cardReplacements,
     streamingModeUpdates,
+    approvalCardMessages,
+    approvalCardPatches,
+    approvalCardDeletes,
     closeRequests,
     textFallbacks,
     parserTraces,
@@ -908,11 +1002,15 @@ function createFakeFeishuPlugin({
   closes,
   cardReplacements,
   streamingModeUpdates,
+  approvalCardMessages,
+  approvalCardPatches,
+  approvalCardDeletes,
   closeRequests,
   textFallbacks,
   singleCardOutput,
   streaming,
   segmentedOutput,
+  syncLocalTurns,
   failContentUpdates,
   failFileUpload,
   failFilePermissionOnce,
@@ -926,6 +1024,8 @@ function createFakeFeishuPlugin({
       singleCardOutput,
       streaming,
       segmentedOutput,
+      syncLocalTurns,
+      defaultChatId: 'oc_chat',
       ackReactionEnabled: false,
       doneReactionEnabled: false,
       appId: 'app',
@@ -999,9 +1099,26 @@ function createFakeFeishuPlugin({
               fileMessages.push(payload);
               return { data: { message_id: 'om_file' } };
             }
-            deliveryEvents.push('card_message');
-            cardMessages.push(payload);
-            return { data: { message_id: 'om_stream' } };
+            const content = JSON.parse(payload.data?.content || '{}');
+            if (content.type === 'card') {
+              deliveryEvents.push('card_message');
+              cardMessages.push(payload);
+              return { data: { message_id: 'om_stream' } };
+            }
+            approvalCardMessages.push(payload);
+            return {
+              data: {
+                message_id: `om_approval_${approvalCardMessages.length}`
+              }
+            };
+          },
+          async patch(payload) {
+            approvalCardPatches.push(payload);
+            return { code: 0 };
+          },
+          async delete(payload) {
+            approvalCardDeletes.push(payload);
+            return { code: 0 };
           }
         }
       }
@@ -1123,7 +1240,30 @@ function boundEvent(sessionId, turnId) {
   };
 }
 
-function authorizationRequested(callId, turnId, command, justification) {
+function authorizationRequested(
+  callId,
+  turnId,
+  command,
+  justification,
+  { allowPersistent = true } = {}
+) {
+  const options = [
+    { selected: true, index: 1, action: 'approve', text: 'Yes, proceed (y)' }
+  ];
+  if (allowPersistent) {
+    options.push({
+      selected: false,
+      index: 2,
+      action: 'approve_persistent',
+      text: "Yes, and don't ask again (p)"
+    });
+  }
+  options.push({
+    selected: false,
+    index: options.length + 1,
+    action: 'deny',
+    text: 'No (esc)'
+  });
   return {
     type: 'authorization_requested',
     callId,
@@ -1136,11 +1276,7 @@ function authorizationRequested(callId, turnId, command, justification) {
       question: '是否允许执行以下操作？',
       reason: `Reason: ${justification}`,
       command,
-      options: [
-        { selected: true, index: 1, text: 'Yes, proceed (y)' },
-        { selected: false, index: 2, text: "Yes, and don't ask again (p)" },
-        { selected: false, index: 3, text: 'No (esc)' }
-      ]
+      options
     }
   };
 }
@@ -1161,7 +1297,7 @@ function feishuMessage(text, messageId = 'om_input') {
   };
 }
 
-function feishuApprovalAction(action, context = '') {
+function feishuApprovalAction(action, context = '', messageId = 'om_stream') {
   return {
     action: {
       value: {
@@ -1171,7 +1307,7 @@ function feishuApprovalAction(action, context = '') {
     },
     context: {
       open_chat_id: 'oc_chat',
-      open_message_id: 'om_stream'
+      open_message_id: messageId
     },
     operator: {
       operator_id: {
@@ -1189,8 +1325,26 @@ function parseCreatedStreamingCard(create) {
   return JSON.parse(create?.body?.data || '{}');
 }
 
+function parseSentCard(message) {
+  return JSON.parse(message?.data?.content || '{}');
+}
+
+function parsePatchedCard(message) {
+  return JSON.parse(message?.data?.content || '{}');
+}
+
 function parseClosedStreamingCard(close) {
   return JSON.parse(close?.body?.card?.data || '{}');
+}
+
+function staticCardMarkdown(card) {
+  return String(
+    card?.elements?.find((element) => element.tag === 'markdown')?.content || ''
+  );
+}
+
+function staticCardButtons(card) {
+  return card?.elements?.find((element) => element.tag === 'action')?.actions || [];
 }
 
 function streamingCardMarkdown(card) {

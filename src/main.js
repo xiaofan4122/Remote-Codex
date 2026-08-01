@@ -23,6 +23,11 @@ const {
   resetFeishuConnection
 } = require('./feishuConnectionCoordinator');
 const { createAppUpdateManager } = require('./appUpdateManager');
+const {
+  LocalTerminalInputTracker,
+  resolveLocalSubmissionPrompt,
+  shouldObserveLocalSubmission
+} = require('./localTerminalInputTracker');
 
 let mainWindow;
 let currentSession;
@@ -32,6 +37,7 @@ let pluginManager;
 let feishuRegistrationManager;
 let appUpdateManager;
 let signalShutdownStarted = false;
+const localTerminalInputTracker = new LocalTerminalInputTracker();
 const launchOptions = parseLaunchOptions(process.argv, process.env, {
   packaged: app.isPackaged
 });
@@ -162,11 +168,21 @@ function createPluginRuntime() {
 }
 
 async function restartPlugins() {
+  const previousFeishu = pluginManager?.getInstance('feishu');
+  const previousActiveChatId =
+    previousFeishu?.pluginConfig?.appId &&
+    previousFeishu.pluginConfig.appId === config.plugins?.feishu?.appId
+      ? String(previousFeishu.activeChatId || '')
+      : '';
   remoteController?.updateConfig(config);
   manager.updateConfig(config);
   execRunner.updateConfig(config);
   appServerRunner.updateConfig(config);
   await pluginManager?.restart(config);
+  if (previousActiveChatId) {
+    const nextFeishu = pluginManager?.getInstance('feishu');
+    if (nextFeishu) nextFeishu.activeChatId = previousActiveChatId;
+  }
 }
 
 function cloneConfig(value = config) {
@@ -304,6 +320,7 @@ function writeVisualNotice(notice) {
 }
 
 function startCodex(cwd = config.codex.defaultCwd) {
+  localTerminalInputTracker.reset();
   if (currentSession) {
     manager.delete(currentSession.id);
     currentSession = null;
@@ -523,7 +540,30 @@ if (!hasSingleInstanceLock) {
   });
 
   ipcMain.on('terminal:input', (_event, data) => {
-    currentSession?.write(data);
+    const session = currentSession;
+    if (!session) return;
+    const submission = localTerminalInputTracker.push(data);
+    if (submission) {
+      const prompt = resolveLocalSubmissionPrompt(
+        submission,
+        session.visualViewportSnapshot || session.visualSnapshot || ''
+      );
+      if (shouldObserveLocalSubmission(prompt)) {
+        try {
+          pluginManager?.getInstance('feishu')?.observeLocalTurn?.({
+            session,
+            prompt,
+            startedAt: Date.now()
+          });
+        } catch (error) {
+          logger.warn('Local terminal rollout observer failed', {
+            sessionId: session.id,
+            error: error.message
+          });
+        }
+      }
+    }
+    session.write(data);
   });
 
   ipcMain.on('terminal:resize', (_event, size) => {

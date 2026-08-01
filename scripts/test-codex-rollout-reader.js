@@ -192,12 +192,26 @@ async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
   assert.equal(approvals[0].source, 'rollout_jsonl');
   assert.equal(approvals[0].command, 'sudo -n /usr/bin/true');
   assert.equal(approvals[0].reason, 'Reason: 验证第一项授权');
+  assert.deepEqual(
+    approvals[0].options.map((option) => option.action),
+    ['approve', 'deny'],
+    'commands without a reusable prefix rule must expose only allow and deny'
+  );
   assert.equal(approvals[1].command, 'xdotool windowactivate 42');
+  assert.deepEqual(
+    approvals[1].options.map((option) => option.action),
+    ['approve', 'deny']
+  );
   assert.equal(
     approvals[2].command,
     '.venv-demo/bin/python -m pip install gradio==5.17.1 einops'
   );
   assert.equal(approvals[2].reason, 'Reason: 是否允许联网下载缺失依赖？');
+  assert.deepEqual(
+    approvals[2].options.map((option) => option.action),
+    ['approve', 'approve_persistent', 'deny'],
+    'a reusable prefix rule enables the persistent approval option'
+  );
   assert.doesNotMatch(JSON.stringify(approvals), /terminal garbage|�|\u0000/);
 
   assert.deepEqual(

@@ -55,6 +55,7 @@ const defaultConfig = {
       singleCardOutput: true,
       streaming: true,
       segmentedOutput: false,
+      syncLocalTurns: false,
       fileTransferEnabled: true,
       fileTransferMaxBytes: 31457280,
       fileTransferMaxFiles: 5,
@@ -181,6 +182,7 @@ function getEnvConfig() {
         singleCardOutput: parseBoolean(process.env.FEISHU_SINGLE_CARD_OUTPUT),
         streaming: parseBoolean(process.env.FEISHU_STREAMING),
         segmentedOutput: parseBoolean(process.env.FEISHU_SEGMENTED_OUTPUT),
+        syncLocalTurns: parseBoolean(process.env.FEISHU_SYNC_LOCAL_TURNS),
         fileTransferEnabled: parseBoolean(process.env.FEISHU_FILE_TRANSFER_ENABLED),
         fileTransferMaxBytes: parseNumber(process.env.FEISHU_FILE_TRANSFER_MAX_BYTES),
         fileTransferMaxFiles: parseNumber(process.env.FEISHU_FILE_TRANSFER_MAX_FILES),
@@ -246,6 +248,8 @@ function normalizeConfig(config, configPath = getConfigPath()) {
     next.plugins.feishu.streaming = true;
     next.plugins.feishu.segmentedOutput = false;
   }
+  next.plugins.feishu.syncLocalTurns =
+    next.plugins.feishu.syncLocalTurns === true;
   next.plugins.feishu.fileTransferEnabled =
     next.plugins.feishu.fileTransferEnabled !== false;
   next.plugins.feishu.fileTransferMaxBytes = normalizePositiveInteger(

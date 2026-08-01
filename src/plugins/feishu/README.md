@@ -28,19 +28,24 @@ directory, and sends it as a Feishu file message. This is available only in
 `long_connection` mode. Files must be non-empty regular files; defaults limit a
 turn to five files and each file to Feishu's 30 MB upload limit. Validation or
 upload failures turn the original completion card orange and add the reason.
+The skill also works for tasks entered directly in the desktop client. Desktop
+prompt and reply text stays local by default, but file directives are still
+observed and delivered to the latest Feishu chat (or the configured authorized
+user). Set `syncLocalTurns` to `true` to forward newly submitted desktop prompts
+and their rollout replies.
 Final-answer LaTeX is rendered locally before the completed card is sent.
 MathJax produces formula SVG, resvg-WASM rasterizes it to a fixed-width PNG,
 and the plugin uploads that PNG for an `image_key`. Block formulas become image
 components. A short line containing inline math is composed from local text
 font segments and formula images on one canvas, so surrounding text is not
 lost. Custom webhooks and failed renders use readable code-block fallbacks.
-Approval prompts are rendered as a waiting-for-confirmation card. The allow,
-always-allow, and reject buttons map to the native Codex prompt keys.
-When Codex exposes selectable approval options, the card lists the concrete
-options and marks the current native selection with `>`. Up/down buttons are
-only shown when selectable options are visible; submit buttons immediately
-update the original card and are locally locked to avoid duplicate approval
-clicks.
+Approval prompts use temporary cards separate from the normal task card. Each
+rollout authorization `callId` gets its own card, whose buttons match the
+choices Codex actually exposes: two-choice prompts show allow and reject,
+while reusable prefix-rule prompts may also show always-allow. Clicking locks
+that card immediately; the card is withdrawn only after the matching
+`authorization_completed` event arrives. If a transport cannot withdraw it,
+Remote Codex sends or patches a button-free completion state instead.
 Native slash pages such as `/resume`, `/permission`, and `/status` use
 dedicated Feishu card button layouts instead of the generic approval controls;
 `/resume` shows up, down, resume, and exit controls for the visible
@@ -69,6 +74,7 @@ Advanced config lives under:
       "singleCardOutput": true,
       "streaming": true,
       "segmentedOutput": false,
+      "syncLocalTurns": false,
       "fileTransferEnabled": true,
       "fileTransferMaxBytes": 31457280,
       "fileTransferMaxFiles": 5,

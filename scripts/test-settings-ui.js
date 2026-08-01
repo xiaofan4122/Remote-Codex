@@ -17,7 +17,11 @@ const preload = fs.readFileSync(path.join(root, 'src', 'preload.js'), 'utf8');
 const main = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
 const styles = fs.readFileSync(path.join(root, 'src', 'styles.css'), 'utf8');
 
-for (const id of ['feishuLatexRenderingEnabled', 'feishuLatexMaxFormulas']) {
+for (const id of [
+  'feishuSyncLocalTurns',
+  'feishuLatexRenderingEnabled',
+  'feishuLatexMaxFormulas'
+]) {
   assert.equal(count(html, `id="${id}"`), 1, `${id} must appear once in settings HTML`);
   assert.match(renderer, new RegExp(id), `${id} must be wired in renderer.js`);
 }
@@ -132,13 +136,16 @@ const config = normalizeConfig({
   plugins: {
     feishu: {
       latexRenderingEnabled: false,
-      latexMaxFormulas: 55
+      latexMaxFormulas: 55,
+      syncLocalTurns: true
     }
   }
 }, '/tmp/remote-codex-settings-test.json');
 
 assert.equal(config.plugins.feishu.latexRenderingEnabled, false);
 assert.equal(config.plugins.feishu.latexMaxFormulas, 55);
+assert.equal(config.plugins.feishu.syncLocalTurns, true);
+assert.equal(normalizeConfig({}).plugins.feishu.syncLocalTurns, false);
 assert.equal(config.ui.onboardingCompleted, false);
 assert.equal(config.updates.automaticEnabled, true);
 assert.equal('rawOutputLogEnabled' in config.remoteControl, false);

@@ -1,6 +1,6 @@
 {
   "name": "remote-codex",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "private": true,
   "description": "Linux desktop and Feishu remote-control shell for the native Codex CLI.",
   "desktopName": "Remote Codex",
@@ -49,6 +49,7 @@
     "test:feishu-latex": "node scripts/test-feishu-latex.js",
     "test:feishu-reconnect": "node scripts/test-feishu-reconnect.js",
     "test:settings-ui": "node scripts/test-settings-ui.js",
+    "test:local-turn-sync": "node scripts/test-local-turn-sync.js",
     "test:shell-syntax": "node scripts/test-shell-syntax.js",
     "test:skill-install": "node scripts/test-skill-install.js",
     "test:codex-session-manager": "node scripts/test-codex-session-manager.js",

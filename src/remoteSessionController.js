@@ -98,6 +98,66 @@ class RemoteSessionController {
     this.sharedSessionProvider = sharedSessionProvider;
   }
 
+  observeLocalTurn(message, options = {}) {
+    const prompt = String(options.prompt || message?.text || '').trim();
+    if (!message || !prompt) return false;
+
+    const key = this.getKey(message);
+    let state = this.sessions.get(key);
+    if (state && options.session && state.session !== options.session) {
+      this.disposeState(state, { kill: false });
+      this.sessions.delete(key);
+      state = null;
+    }
+    if (!state) {
+      const starting = this.startSession(key, message, '', {
+        restartShared: false,
+        announce: false
+      });
+      state = this.sessions.get(key);
+      starting.catch((error) => {
+        this.logger.warn?.('Local rollout observer session failed:', error.message);
+      });
+    }
+    if (!state) return false;
+
+    this.refreshVisualBusyState(state, 'local_terminal_submission');
+    const turnOptions = {
+      observeOnly: true,
+      matchNextPrompt: options.matchNextPrompt !== false,
+      startedAt: Number(options.startedAt) || Date.now(),
+      inputSource: 'local',
+      suppressReplyText: message.suppressReplyText === true
+    };
+    if (hasActiveRemoteTurn(state)) {
+      this.queueRemoteMessage(state, message, prompt, turnOptions).catch((error) => {
+        this.logger.warn?.('Local queued rollout observer failed:', error.message);
+      });
+      return true;
+    }
+
+    this.discardPendingReply(state, 'new_local_terminal_turn');
+    this.resetPendingOutput(state);
+    this.assignTurnMessage(state, message);
+    state.inputSource = turnOptions.inputSource;
+    state.suppressReplyText = turnOptions.suppressReplyText;
+    state.lastInputText = prompt;
+    state.turnStartedAt = turnOptions.startedAt;
+    state.turnFinishedNotified = false;
+    state.phase = 'working';
+    const replyStreamReady = this.startReplyStreamBeforeTerminalInput(state, message);
+    state.replyStreamReadyPromise = replyStreamReady;
+    this.beginRolloutTurn(state, prompt, turnOptions);
+    this.logger.event?.('remote.local_turn.observed', {
+      pluginId: state.pluginId,
+      conversationId: state.conversationId,
+      sessionId: state.session?.id || '',
+      syncReplyText: !state.suppressReplyText,
+      promptChars: prompt.length
+    });
+    return true;
+  }
+
   async handleMessage(message) {
     const text = String(message.text || '').trim();
     if (!text) return;
@@ -305,18 +365,15 @@ class RemoteSessionController {
       return;
     }
 
-    state.reply = message.reply;
-    state.replyPanel = message.replyPanel;
-    state.replySegment = message.replySegment;
-    state.createReplyStream = message.createReplyStream;
-    state.onTurnFinished = message.onTurnFinished;
-    state.sendFile = message.sendFile;
+    this.assignTurnMessage(state, message);
     this.discardPendingReply(state, 'new_user_message');
     state.lastInputText = text;
     state.turnStartedAt = Date.now();
     state.turnFinishedNotified = false;
     this.emitRemoteInput(message, text, state);
     this.resetPendingOutput(state);
+    state.inputSource = 'remote';
+    state.suppressReplyText = false;
     const replyStreamReady = this.startReplyStreamBeforeTerminalInput(state, message);
     state.replyStreamReadyPromise = replyStreamReady;
     this.beginRolloutTurn(state, text);
@@ -363,11 +420,13 @@ class RemoteSessionController {
     return true;
   }
 
-  async queueRemoteMessage(state, message, text) {
+  async queueRemoteMessage(state, message, text, options = {}) {
     if (!state || !message || !text) return null;
     if (!Array.isArray(state.queuedMessages)) state.queuedMessages = [];
-    const submittedAt = Date.now();
-    const bindNextRollout = shouldBindNextRollout(text);
+    const submittedAt = Number(options.startedAt) || Date.now();
+    const bindNextRollout = options.matchNextPrompt === undefined
+      ? shouldBindNextRollout(text)
+      : Boolean(options.matchNextPrompt);
     const skipPromptMatches = bindNextRollout
       ? state.queuedMessages.filter((queued) => queued.bindNextRollout).length
       : state.queuedMessages.filter((queued) => queued.prompt === text).length;
@@ -380,8 +439,12 @@ class RemoteSessionController {
       replyPanel: message.replyPanel,
       replySegment: message.replySegment,
       createReplyStream: message.createReplyStream,
+      createApprovalPanel: message.createApprovalPanel,
+      closeApprovalPanel: message.closeApprovalPanel,
       onTurnFinished: message.onTurnFinished,
       sendFile: message.sendFile,
+      inputSource: options.inputSource || 'remote',
+      suppressReplyText: options.suppressReplyText === true,
       events: [],
       error: null,
       active: false,
@@ -421,14 +484,18 @@ class RemoteSessionController {
       queued.error = new Error('Codex rollout reader is not configured.');
     }
 
-    this.emitRemoteInput(message, text, state);
-    state.session.write(buildSubmitInput(text));
+    if (!options.observeOnly) {
+      this.emitRemoteInput(message, text, state);
+      state.session.write(buildSubmitInput(text));
+    }
     this.logger.event?.('remote.message.queued', {
       pluginId: state.pluginId,
       conversationId: state.conversationId,
       sessionId: state.session?.id || '',
       queueLength: state.queuedMessages.length,
-      promptChars: text.length
+      promptChars: text.length,
+      inputSource: queued.inputSource,
+      observeOnly: Boolean(options.observeOnly)
     });
     if (!state.rolloutFinished) {
       await this.handoffRolloutForQueuedMessage(state, {
@@ -449,12 +516,9 @@ class RemoteSessionController {
     try {
       const queued = state.queuedMessages.shift();
       this.resetPendingOutput(state);
-      state.reply = queued.reply;
-      state.replyPanel = queued.replyPanel;
-      state.replySegment = queued.replySegment;
-      state.createReplyStream = queued.createReplyStream;
-      state.onTurnFinished = queued.onTurnFinished;
-      state.sendFile = queued.sendFile;
+      this.assignTurnMessage(state, queued);
+      state.inputSource = queued.inputSource || 'remote';
+      state.suppressReplyText = queued.suppressReplyText === true;
       state.lastInputText = queued.prompt;
       state.turnStartedAt = queued.submittedAt;
       state.turnFinishedNotified = false;
@@ -489,7 +553,7 @@ class RemoteSessionController {
     }
   }
 
-  beginRolloutTurn(state, prompt) {
+  beginRolloutTurn(state, prompt, options = {}) {
     if (!this.shouldUseRolloutOutput(state?.pluginId)) return null;
     const generation = Number(state.rolloutGeneration || 0);
     if (!this.rolloutReader?.beginTurn) {
@@ -503,9 +567,11 @@ class RemoteSessionController {
 
     const handle = this.rolloutReader.beginTurn({
       prompt,
-      matchNextPrompt: shouldBindNextRollout(prompt),
+      matchNextPrompt: options.matchNextPrompt === undefined
+        ? shouldBindNextRollout(prompt)
+        : Boolean(options.matchNextPrompt),
       cwd: state.session?.cwd || this.config.codex?.defaultCwd,
-      startedAt: state.turnStartedAt,
+      startedAt: Number(options.startedAt) || state.turnStartedAt,
       onEvent: (event) => this.enqueueRolloutEvent(state, generation, event),
       onError: (error) => this.enqueueRolloutFailure(state, generation, error)
     });
@@ -515,7 +581,9 @@ class RemoteSessionController {
       conversationId: state.conversationId,
       sessionId: state.session?.id || '',
       generation,
-      promptChars: String(prompt || '').length
+      promptChars: String(prompt || '').length,
+      inputSource: state.inputSource || 'remote',
+      suppressReplyText: state.suppressReplyText === true
     });
     return handle;
   }
@@ -648,6 +716,9 @@ class RemoteSessionController {
 
     if (type === 'bound') {
       this.activateNativePickerTaskRollout(state, event);
+      if (state.inputSource === 'local' && event.prompt) {
+        state.lastInputText = String(event.prompt).trim() || state.lastInputText;
+      }
       state.rolloutSessionId = String(event.sessionId || '');
       state.rolloutTurnId = String(event.turnId || '');
       state.rolloutPath = String(event.rolloutPath || '');
@@ -813,6 +884,11 @@ class RemoteSessionController {
       decision: 'clear_rollout_authorization'
     });
 
+    await this.closeRolloutApprovalPanel(state, callId, {
+      completed: true,
+      reason: 'authorization_completed'
+    });
+
     const next = state.rolloutApprovalQueue.shift();
     if (next) await this.activateRolloutApproval(state, next);
   }
@@ -825,6 +901,17 @@ class RemoteSessionController {
     state.submittedApprovalAt = 0;
     state.approvalPanelRetryAt = 0;
     this.refreshSessionPhase(state, 'rollout_authorization_requested');
+
+    if (state.suppressReplyText) {
+      this.logger.event?.('remote.approval.rollout.local_only', {
+        pluginId: state.pluginId,
+        conversationId: state.conversationId,
+        sessionId: state.session?.id || '',
+        callId: approval.callId,
+        reason: 'local_text_sync_disabled'
+      });
+      return;
+    }
 
     const signature = approvalPromptSignature(approval);
     const panel = this.buildPermissionPanelPayload(
@@ -863,6 +950,16 @@ class RemoteSessionController {
   }
 
   async sendRolloutFailure(state, detail) {
+    if (state.suppressReplyText) {
+      this.logger.event?.('remote.rollout.failure.suppressed', {
+        pluginId: state.pluginId,
+        conversationId: state.conversationId,
+        sessionId: state.session?.id || '',
+        inputSource: state.inputSource || 'remote',
+        detail: clipForLog(detail)
+      });
+      return;
+    }
     const text = [
       '**Remote Codex 输出失败**',
       String(detail || '无法从 rollout JSONL 读取最终回复。'),
@@ -888,6 +985,7 @@ class RemoteSessionController {
   async sendRolloutProgress(state, text) {
     const value = normalizeRolloutOutputText(text);
     if (!value) return 'ignore_empty_progress';
+    if (state.suppressReplyText) return 'ignore_local_progress_sync_disabled';
     state.phase = 'working';
     state.lastOutputAt = Date.now();
     const outputConfig = this.getOutputConfig(state.pluginId);
@@ -937,12 +1035,29 @@ class RemoteSessionController {
     state.rolloutFinalText = value;
     state.lastReplyText = value;
     state.lastReplySignature = remoteMessageSignature(value);
+    if (state.suppressReplyText) {
+      await this.completePendingRemoteFiles(state, value);
+      if (state.remoteFileWarnings?.length) {
+        this.logger.event?.('remote.local_file.warning.suppressed', {
+          pluginId: state.pluginId,
+          conversationId: state.conversationId,
+          sessionId: state.session?.id || '',
+          warnings: state.remoteFileWarnings.length,
+          reason: 'local_text_sync_disabled'
+        });
+        return 'suppress_local_file_warning_text';
+      }
+      return state.remoteFileDirectiveCount > 0
+        ? 'deliver_local_files_without_text_sync'
+        : 'ignore_local_final_sync_disabled';
+    }
     const outputConfig = this.getOutputConfig(state.pluginId);
     if (
       !outputConfig.sendOutput ||
       outputConfig.outputMode === 'silent' ||
       outputConfig.outputMode === 'status_only'
     ) {
+      await this.completePendingRemoteFiles(state, value);
       return 'ignore_output_disabled';
     }
 
@@ -982,6 +1097,7 @@ class RemoteSessionController {
     state.pendingRemoteFiles = [];
     state.remoteFilesDelivered = false;
     state.remoteFileWarnings = [];
+    state.remoteFileDirectiveCount = extracted.files.length;
     if (!extracted.files.length) return extracted.text;
 
     const pluginConfig = this.getPluginConfig(state.pluginId);
@@ -1098,6 +1214,7 @@ class RemoteSessionController {
     state.rolloutFinished = true;
     state.rolloutTurn?.stop?.('controller_complete');
     state.rolloutTurn = null;
+    this.closeOutstandingRolloutApprovalPanels(state, 'turn_complete');
     state.pendingRolloutApproval = null;
     state.rolloutApprovalQueue = [];
     state.outputBuffer = '';
@@ -1413,6 +1530,8 @@ class RemoteSessionController {
       nativeTaskRolloutPending: false,
       pendingReplyTimer: null,
       createReplyStream: message.createReplyStream,
+      createApprovalPanel: message.createApprovalPanel,
+      closeApprovalPanel: message.closeApprovalPanel,
       onTurnFinished: message.onTurnFinished,
       sendFile: message.sendFile,
       replyStream: null,
@@ -1456,6 +1575,7 @@ class RemoteSessionController {
       pendingRemoteFiles: [],
       remoteFilesDelivered: false,
       remoteFileWarnings: [],
+      remoteFileDirectiveCount: 0,
       sentSegmentSignatures: new Set(),
       nativePanelUpdateRequested: false,
       controlActionLocks: new Map(),
@@ -1463,6 +1583,7 @@ class RemoteSessionController {
       rolloutApprovalQueue: [],
       rolloutApprovalCallIds: new Set(),
       completedRolloutApprovalCallIds: new Set(),
+      rolloutApprovalPanels: new Map(),
       lastApprovalSignature: '',
       lastApprovalAttemptSignature: '',
       submittedApprovalSignature: '',
@@ -1470,6 +1591,8 @@ class RemoteSessionController {
       approvalPanelInFlight: false,
       approvalPanelRetryAt: 0,
       lastInputText: '',
+      inputSource: 'remote',
+      suppressReplyText: false,
       nativeCommand: null,
       nativePageAction: null,
       phase: 'idle',
@@ -1671,6 +1794,8 @@ class RemoteSessionController {
     state.reply = message.reply;
     state.replyPanel = message.replyPanel;
     state.createReplyStream = message.createReplyStream;
+    state.createApprovalPanel = message.createApprovalPanel || state.createApprovalPanel;
+    state.closeApprovalPanel = message.closeApprovalPanel || state.closeApprovalPanel;
     state.onTurnFinished = message.onTurnFinished;
     this.discardPendingReply(state, 'native_slash_command');
     this.logger.event?.('remote.native_slash.start', {
@@ -1812,6 +1937,23 @@ class RemoteSessionController {
         });
       }
       return;
+    }
+    if (approvalAction) {
+      const requestedApprovalAction = canonicalApprovalControlAction(action);
+      const availableApprovalActions = this.buildPermissionPanelActions(approval);
+      if (
+        requestedApprovalAction &&
+        !availableApprovalActions.includes(requestedApprovalAction)
+      ) {
+        this.logger.event?.('remote.control.rejected_unavailable_approval_action', {
+          pluginId: message.pluginId,
+          conversationId: message.conversationId,
+          action: requestedApprovalAction,
+          availableActions: availableApprovalActions
+        });
+        await message.reply('当前授权请求不提供这个选项，请使用授权卡中的可用按钮。');
+        return;
+      }
     }
     if (this.isBufferedControlAction(state, action, approval)) {
       await message.reply('操作已收到，正在处理，请勿重复点击。');
@@ -2060,6 +2202,16 @@ class RemoteSessionController {
   }
 
   async startReplyStream(state, message) {
+    if (state.suppressReplyText) {
+      this.logger.event?.('remote.stream.start.skipped', {
+        pluginId: state.pluginId,
+        conversationId: state.conversationId,
+        sessionId: state.session?.id || '',
+        reason: 'local_text_sync_disabled',
+        controlMode: this.getReplyStreamControlMode(state)
+      });
+      return;
+    }
     const outputConfig = this.getOutputConfig(state.pluginId);
     if (
       !outputConfig.sendOutput ||
@@ -2688,7 +2840,35 @@ class RemoteSessionController {
       if (state.replyStreamStarting && state.replyStreamReadyPromise) {
         await state.replyStreamReadyPromise;
       }
-      if (typeof state.replyStream?.showPanel === 'function') {
+      if (typeof state.createApprovalPanel === 'function') {
+        try {
+          const callId = String(panel?.approval?.callId || panel?.approval?.id || '').trim();
+          const handle = await state.createApprovalPanel({
+            panel,
+            callId
+          });
+          if (!(state.rolloutApprovalPanels instanceof Map)) {
+            state.rolloutApprovalPanels = new Map();
+          }
+          if (callId) {
+            state.rolloutApprovalPanels.set(callId, handle || {});
+          }
+          presented = true;
+          this.logger.event?.('remote.approval.panel.created', {
+            pluginId: state.pluginId,
+            conversationId: state.conversationId,
+            sessionId: state.session?.id || '',
+            callId,
+            separate: true
+          });
+        } catch (error) {
+          this.logger.warn?.('Remote separate approval panel failed', {
+            error: String(error?.message || error || 'Unknown error'),
+            signature
+          });
+        }
+      }
+      if (!presented && typeof state.replyStream?.showPanel === 'function') {
         try {
           await state.replyStream.showPanel(panel);
           presented = true;
@@ -2713,6 +2893,47 @@ class RemoteSessionController {
       return presented;
     } finally {
       state.approvalPanelInFlight = false;
+    }
+  }
+
+  async closeRolloutApprovalPanel(state, callId, options = {}) {
+    if (!callId || !(state?.rolloutApprovalPanels instanceof Map)) return false;
+    if (!state.rolloutApprovalPanels.has(callId)) return false;
+    const handle = state.rolloutApprovalPanels.get(callId);
+    state.rolloutApprovalPanels.delete(callId);
+    if (typeof state.closeApprovalPanel !== 'function') return false;
+    try {
+      await state.closeApprovalPanel({
+        handle,
+        callId,
+        completed: options.completed !== false,
+        reason: options.reason || 'authorization_completed'
+      });
+      this.logger.event?.('remote.approval.panel.closed', {
+        pluginId: state.pluginId,
+        conversationId: state.conversationId,
+        sessionId: state.session?.id || '',
+        callId,
+        reason: options.reason || 'authorization_completed'
+      });
+      return true;
+    } catch (error) {
+      this.logger.warn?.('Remote approval panel close failed', {
+        callId,
+        error: String(error?.message || error || 'Unknown error')
+      });
+      return false;
+    }
+  }
+
+  closeOutstandingRolloutApprovalPanels(state, reason = 'turn_closed') {
+    if (!(state?.rolloutApprovalPanels instanceof Map)) return;
+    const callIds = [...state.rolloutApprovalPanels.keys()];
+    for (const callId of callIds) {
+      this.closeRolloutApprovalPanel(state, callId, {
+        completed: false,
+        reason
+      }).catch(() => {});
     }
   }
 
@@ -2762,8 +2983,15 @@ class RemoteSessionController {
     };
   }
 
-  buildPermissionPanelActions() {
-    return ['approve', 'approve_persistent', 'deny'];
+  buildPermissionPanelActions(approval = {}) {
+    const options = Array.isArray(approval?.options) ? approval.options : [];
+    if (options.length === 0) return ['approve', 'deny'];
+    const actions = [];
+    for (let index = 0; index < options.length; index += 1) {
+      const action = approvalOptionControlAction(options[index], index, options.length);
+      if (action && !actions.includes(action)) actions.push(action);
+    }
+    return actions;
   }
 
   buildNativeSlashPanelPayload(state, content) {
@@ -3210,6 +3438,17 @@ class RemoteSessionController {
     }
   }
 
+  assignTurnMessage(state, message) {
+    state.reply = message.reply;
+    state.replyPanel = message.replyPanel;
+    state.replySegment = message.replySegment;
+    state.createReplyStream = message.createReplyStream;
+    state.createApprovalPanel = message.createApprovalPanel;
+    state.closeApprovalPanel = message.closeApprovalPanel;
+    state.onTurnFinished = message.onTurnFinished;
+    state.sendFile = message.sendFile;
+  }
+
   resetPendingOutput(state) {
     state.rolloutTurn?.stop?.('new_turn');
     if (state.flushTimer) {
@@ -3281,18 +3520,23 @@ class RemoteSessionController {
     state.pendingRemoteFiles = [];
     state.remoteFilesDelivered = false;
     state.remoteFileWarnings = [];
+    state.remoteFileDirectiveCount = 0;
     state.sentSegmentSignatures = new Set();
     state.nativePanelUpdateRequested = false;
+    this.closeOutstandingRolloutApprovalPanels(state, 'turn_reset');
     state.pendingRolloutApproval = null;
     state.rolloutApprovalQueue = [];
     state.rolloutApprovalCallIds = new Set();
     state.completedRolloutApprovalCallIds = new Set();
+    state.rolloutApprovalPanels = new Map();
     state.lastApprovalSignature = '';
     state.lastApprovalAttemptSignature = '';
     state.submittedApprovalSignature = '';
     state.submittedApprovalAt = 0;
     state.approvalPanelInFlight = false;
     state.approvalPanelRetryAt = 0;
+    state.inputSource = 'remote';
+    state.suppressReplyText = false;
     state.nativeCommand = null;
     state.nativePageAction = null;
     state.nativeTaskRolloutPending = false;
@@ -3304,6 +3548,7 @@ class RemoteSessionController {
 
   disposeState(state, options = {}) {
     state.stopped = true;
+    this.closeOutstandingRolloutApprovalPanels(state, 'state_disposed');
     state.rolloutTurn?.stop?.('state_disposed');
     state.rolloutTurn = null;
     for (const queued of state.queuedMessages || []) {
@@ -4981,6 +5226,38 @@ function isApprovalControlAction(action) {
     'cancel',
     'no'
   ].includes(value);
+}
+
+function canonicalApprovalControlAction(action) {
+  const value = String(action || '').toLowerCase();
+  if (['approve', 'yes'].includes(value)) return 'approve';
+  if (['approve_persistent', 'always', 'persist'].includes(value)) {
+    return 'approve_persistent';
+  }
+  if (['deny', 'escape', 'cancel', 'no'].includes(value)) return 'deny';
+  return '';
+}
+
+function approvalOptionControlAction(option, index, total) {
+  const explicit = canonicalApprovalControlAction(
+    option?.action || option?.value || option?.key || ''
+  );
+  if (explicit) return explicit;
+
+  const text = String(option?.text || option?.label || option || '').toLowerCase();
+  if (
+    /don't ask again|do not ask again|always approve|persistent|persist|\(p\)|总是允许|始终允许|不再询问/.test(text)
+  ) {
+    return 'approve_persistent';
+  }
+  if (/\bno\b|deny|reject|cancel|\besc\b|拒绝|取消/.test(text)) return 'deny';
+  if (/\byes\b|allow|approve|proceed|continue|允许|同意|继续/.test(text)) {
+    return 'approve';
+  }
+
+  if (index === 0) return 'approve';
+  if (index === total - 1) return 'deny';
+  return total >= 3 ? 'approve_persistent' : '';
 }
 
 function isSubmitControlAction(action) {

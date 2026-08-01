@@ -11,10 +11,12 @@ const feishuPlugin = require('../src/plugins/feishu');
 async function main() {
   testApprovalOptionSelection();
   testFeishuPermissionPanelIsCompact();
+  await testApprovalActionsMatchAvailableOptions();
   await testRemoteControlInputBuffer();
   await testStaleApprovalContextIsRejected();
   await testFeishuCardActionTriggerAcknowledgesImmediately();
   await testFeishuCardActionUpdatesAndDedupes();
+  await testApprovalCompletionFallsBackWhenCardCannotBeWithdrawn();
   await testFeishuNativeActionCompletionPatchesOriginalCard();
   await testFeishuPermissionModeCardActionKeepsPageContext();
   await testFeishuFollowupPanelAllowsSecondSubmit();
@@ -170,6 +172,70 @@ function testFeishuPermissionPanelIsCompact() {
   assert.match(fallbackMarkdown, /Need to verify\./);
   assert.match(fallbackMarkdown, /npm run test:feishu-remote-turn/);
   assert.doesNotMatch(fallbackMarkdown, /选项|Yes, always approve|Would you like to run/);
+}
+
+async function testApprovalActionsMatchAvailableOptions() {
+  const controller = createController();
+  const key = 'feishu:two-option-approval';
+  const writes = [];
+  const replies = [];
+  const approval = {
+    ...rolloutApproval('call-two-option-approval'),
+    options: [
+      { index: 1, action: 'approve', text: 'Yes, proceed (y)', selected: true },
+      { index: 2, action: 'deny', text: 'No (esc)', selected: false }
+    ]
+  };
+  const state = {
+    key,
+    pluginId: 'feishu',
+    conversationId: 'two-option-approval',
+    session: {
+      id: 's-two-option',
+      write(input) {
+        writes.push(input);
+      },
+      status() {
+        return { exited: false };
+      }
+    },
+    cursor: 0,
+    controlActionLocks: new Map(),
+    pendingRolloutApproval: approval
+  };
+  controller.sessions.set(key, state);
+
+  const panel = controller.buildPermissionPanelPayload(key, null, state, approval);
+  assert.deepEqual(panel.actions, ['approve', 'deny']);
+  const threeOptionPanel = controller.buildPermissionPanelPayload(
+    key,
+    null,
+    state,
+    rolloutApproval('call-three-option-approval')
+  );
+  assert.deepEqual(
+    threeOptionPanel.actions,
+    ['approve', 'approve_persistent', 'deny']
+  );
+  const card = feishuPlugin.__private.buildPanelCard(panel);
+  assert.deepEqual(
+    card.elements.find((element) => element.tag === 'action').actions
+      .map((action) => action.value.remote_codex_action),
+    ['approve', 'deny']
+  );
+
+  const message = {
+    pluginId: 'feishu',
+    conversationId: 'two-option-approval',
+    approvalContext: panel.actionContext,
+    reply: async (text) => replies.push(text)
+  };
+  await controller.sendControlInput(key, message, 'approve_persistent');
+  assert.deepEqual(writes, []);
+  assert.match(replies.at(-1), /不提供这个选项/);
+
+  await controller.sendControlInput(key, message, 'approve');
+  assert.deepEqual(writes, ['y']);
 }
 
 async function testRemoteControlInputBuffer() {
@@ -361,8 +427,108 @@ async function testFeishuCardActionUpdatesAndDedupes() {
 
   assert.equal(handleCount, 2);
   assert.equal(patchCount, 2);
-  assert.equal(deleteCount, 2);
+  assert.equal(
+    deleteCount,
+    0,
+    'approval cards must remain visible until authorization_completed arrives'
+  );
   assert.deepEqual(routedContexts, ['approval-one', 'approval-two']);
+}
+
+async function testApprovalCompletionFallsBackWhenCardCannotBeWithdrawn() {
+  const fallbackPanels = [];
+  const plugin = feishuPlugin.create({
+    config: {},
+    pluginConfig: {
+      mode: 'custom_webhook',
+      customWebhookUrl: 'https://example.invalid/webhook'
+    },
+    services: {},
+    logger: {
+      event() {},
+      warn() {}
+    }
+  });
+  plugin.sendPanel = async (payload) => {
+    fallbackPanels.push(payload);
+    return { kind: 'card', messageId: '', dismissible: false };
+  };
+
+  const withdrawn = await plugin.closeApprovalPanel({
+    callId: 'call-webhook-approval',
+    completed: true,
+    handle: {
+      receiveId: 'oc_chat',
+      receiveIdType: 'chat_id',
+      panel: {
+        kind: 'permission',
+        title: 'Remote Codex 权限确认',
+        attached: true,
+        active: true,
+        actions: ['approve', 'deny']
+      }
+    }
+  });
+
+  assert.equal(withdrawn, false);
+  assert.equal(fallbackPanels.length, 1);
+  assert.equal(fallbackPanels[0].panel.active, false);
+  assert.equal(fallbackPanels[0].panel.completed, true);
+  assert.deepEqual(fallbackPanels[0].panel.actions, []);
+  assert.match(fallbackPanels[0].panel.message, /授权已完成/);
+
+  const patches = [];
+  const longConnectionPlugin = feishuPlugin.create({
+    config: {},
+    pluginConfig: {
+      mode: 'long_connection',
+      appId: 'app',
+      appSecret: 'secret'
+    },
+    services: {},
+    logger: {
+      event() {},
+      warn() {}
+    }
+  });
+  longConnectionPlugin.client = {
+    im: {
+      v1: {
+        message: {
+          async delete() {
+            throw new Error('temporary delete failure');
+          },
+          async patch(payload) {
+            patches.push(JSON.parse(payload.data.content));
+            return { code: 0 };
+          }
+        }
+      }
+    }
+  };
+
+  await longConnectionPlugin.closeApprovalPanel({
+    callId: 'call-delete-fallback',
+    completed: true,
+    handle: {
+      messageId: 'om_approval',
+      panel: {
+        kind: 'permission',
+        title: 'Remote Codex 权限确认',
+        attached: true,
+        active: true,
+        actions: ['approve', 'deny']
+      }
+    }
+  });
+
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0].header.template, 'green');
+  assert.equal(patches[0].elements.some((element) => element.tag === 'action'), false);
+  assert.match(
+    patches[0].elements.find((element) => element.tag === 'markdown').content,
+    /授权已完成/
+  );
 }
 
 async function testFeishuNativeActionCompletionPatchesOriginalCard() {

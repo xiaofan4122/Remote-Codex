@@ -14,6 +14,7 @@ const languageSelect = document.getElementById('uiLanguage');
 const automaticUpdatesCheckbox = document.getElementById('automaticUpdatesEnabled');
 const updateStatusElement = document.getElementById('updateStatus');
 const updateActionButton = document.getElementById('updateAction');
+const syncLocalTurnsCheckbox = document.getElementById('feishuSyncLocalTurns');
 const latexRenderingCheckbox = document.getElementById('feishuLatexRenderingEnabled');
 const latexMaxFormulasInput = document.getElementById('feishuLatexMaxFormulas');
 const connectFeishuButton = document.getElementById('connectFeishu');
@@ -90,6 +91,8 @@ const I18N = {
     updateStatusUnsupported: '当前安装方式不支持应用内更新。',
     updateStatusDevelopment: '开发模式不执行应用更新。',
     updateStatusError: '更新失败：{error}',
+    syncLocalTurns: '将新提交的客户端任务发送到飞书',
+    syncLocalTurnsHelp: '默认关闭。开启后，仅将之后在客户端新提交的任务及其回复发送到飞书。',
     latexRenderingEnabled: '将 LaTeX 公式渲染为图片',
     latexMaxFormulas: '每条回复最多渲染的公式区域',
     connection: '连接',
@@ -162,6 +165,8 @@ const I18N = {
     updateStatusUnsupported: 'This installation cannot be updated in the app.',
     updateStatusDevelopment: 'Application updates are disabled in development mode.',
     updateStatusError: 'Update failed: {error}',
+    syncLocalTurns: 'Send new desktop tasks to Feishu',
+    syncLocalTurnsHelp: 'Off by default. When enabled, newly submitted desktop tasks and their replies are sent to Feishu.',
     latexRenderingEnabled: 'Render LaTeX formulas as images',
     latexMaxFormulas: 'Maximum formula regions per reply',
     connection: 'Connection',
@@ -1022,6 +1027,7 @@ function populateSettings(config) {
   setValue('uiLanguage', currentLanguage);
   const feishu = config.plugins?.feishu || {};
   automaticUpdatesCheckbox.checked = config.updates?.automaticEnabled !== false;
+  syncLocalTurnsCheckbox.checked = feishu.syncLocalTurns === true;
   latexRenderingCheckbox.checked = feishu.latexRenderingEnabled !== false;
   latexMaxFormulasInput.value = String(feishu.latexMaxFormulas || 64);
   syncLatexSettingsState();
@@ -1068,6 +1074,7 @@ function collectSettings(baseConfig) {
   feishu.singleCardOutput = true;
   feishu.streaming = true;
   feishu.segmentedOutput = false;
+  feishu.syncLocalTurns = syncLocalTurnsCheckbox.checked;
   feishu.ackReactionEnabled = true;
   feishu.ackReactionEmoji = '了解';
   feishu.latexRenderingEnabled = latexRenderingCheckbox.checked;

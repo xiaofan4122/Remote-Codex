@@ -638,6 +638,26 @@ function buildRolloutAuthorization({ callId, turnId, requests }) {
   );
   const command = commands.join('\n');
   const justification = justifications.join('；');
+  const canPersist = normalizedRequests.every(
+    (request) => Array.isArray(request.prefixRule) && request.prefixRule.length > 0
+  );
+  const options = [
+    { selected: true, index: 1, action: 'approve', text: 'Yes, proceed (y)' }
+  ];
+  if (canPersist) {
+    options.push({
+      selected: false,
+      index: 2,
+      action: 'approve_persistent',
+      text: "Yes, and don't ask again (p)"
+    });
+  }
+  options.push({
+    selected: false,
+    index: options.length + 1,
+    action: 'deny',
+    text: 'No, and tell Codex what to do differently (esc)'
+  });
   return {
     id: callId,
     callId,
@@ -651,11 +671,7 @@ function buildRolloutAuthorization({ callId, turnId, requests }) {
     reason: justification ? `Reason: ${justification}` : '',
     command: command || '命令由 Codex 在运行时生成。',
     commandCount: normalizedRequests.length,
-    options: [
-      { selected: true, index: 1, text: 'Yes, proceed (y)' },
-      { selected: false, index: 2, text: "Yes, and don't ask again (p)" },
-      { selected: false, index: 3, text: 'No, and tell Codex what to do differently (esc)' }
-    ]
+    options
   };
 }
 

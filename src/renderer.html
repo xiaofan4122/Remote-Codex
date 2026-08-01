@@ -93,6 +93,11 @@
           <section class="settings-section">
             <h3>Feishu</h3>
             <div class="check-row">
+              <input id="feishuSyncLocalTurns" name="feishuSyncLocalTurns" type="checkbox" />
+              <label for="feishuSyncLocalTurns" data-i18n="syncLocalTurns">将新提交的客户端任务发送到飞书</label>
+            </div>
+            <p class="settings-help" data-i18n="syncLocalTurnsHelp">默认关闭。开启后，仅将之后在客户端新提交的任务及其回复发送到飞书。</p>
+            <div class="check-row">
               <input id="feishuLatexRenderingEnabled" name="feishuLatexRenderingEnabled" type="checkbox" />
               <label for="feishuLatexRenderingEnabled" data-i18n="latexRenderingEnabled">将 LaTeX 公式渲染为图片</label>
             </div>
