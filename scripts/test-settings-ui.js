@@ -57,6 +57,24 @@ assert.match(preload, /completeOnboarding:.*ui:onboarding-complete/);
 assert.match(main, /ipcMain\.handle\('ui:onboarding-complete'/);
 assert.doesNotMatch(html, /feishuBotMenuHint|机器人菜单/);
 assert.doesNotMatch(renderer, /feishuBotMenuHint|悬浮菜单|floating bot menu/);
+assert.doesNotMatch(html, /codexDefaultCwd|defaultWorkingDirectory|默认工作目录/);
+assert.doesNotMatch(renderer, /codexDefaultCwd|defaultWorkingDirectory/);
+assert.doesNotMatch(
+  renderer,
+  /next\.codex\.(?:defaultCwd|configuredDefaultCwd)\s*=/,
+  'saving common settings must preserve the command-line working directory configuration'
+);
+assert.match(
+  styles,
+  /\.settings-dialog\s*\{[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/s,
+  'the settings grid must constrain its scrollable middle row'
+);
+assert.match(
+  styles,
+  /\.settings-content\s*\{[^}]*overflow-y:\s*scroll;[^}]*scrollbar-gutter:\s*stable;/s,
+  'the settings body must keep a visible vertical scrollbar gutter'
+);
+assert.match(styles, /\.settings-content::\-webkit-scrollbar-thumb/);
 const onboardingHandler = main.slice(
   main.indexOf("ipcMain.handle('ui:onboarding-complete'"),
   main.indexOf("ipcMain.handle('feishu:connect-start'")

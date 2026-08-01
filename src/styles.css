@@ -298,6 +298,8 @@ textarea {
   z-index: 10;
   display: grid;
   place-items: stretch end;
+  min-height: 0;
+  overflow: hidden;
   background: rgba(5, 8, 12, 0.64);
 }
 
@@ -310,7 +312,11 @@ textarea {
   grid-template-rows: auto 1fr auto;
   width: min(560px, 100vw);
   height: 100%;
+  max-height: 100vh;
+  max-height: 100dvh;
+  min-height: 0;
   min-width: 0;
+  overflow: hidden;
   border-left: 1px solid #27313d;
   background: #181d23;
   box-shadow: -24px 0 48px rgba(0, 0, 0, 0.28);
@@ -343,8 +349,33 @@ textarea {
   align-content: start;
   gap: 18px;
   min-height: 0;
-  overflow: auto;
-  padding: 16px;
+  overflow-x: hidden;
+  overflow-y: scroll;
+  overscroll-behavior: contain;
+  padding: 16px 10px 16px 16px;
+  scrollbar-color: #64748b #111820;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.settings-content::-webkit-scrollbar {
+  width: 12px;
+}
+
+.settings-content::-webkit-scrollbar-track {
+  border-left: 1px solid #27313d;
+  background: #111820;
+}
+
+.settings-content::-webkit-scrollbar-thumb {
+  min-height: 40px;
+  border: 3px solid #111820;
+  border-radius: 999px;
+  background: #64748b;
+}
+
+.settings-content::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
 }
 
 .settings-section {

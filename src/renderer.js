@@ -58,7 +58,6 @@ const I18N = {
     languageChinese: '中文',
     languageEnglish: 'English',
     terminalScrollback: '终端滚动历史',
-    defaultWorkingDirectory: '默认工作目录',
     softwareUpdates: '软件更新',
     automaticUpdatesEnabled: '自动检查并下载更新',
     automaticUpdatesHelp: '下载完成后将在退出时安装，也可以立即安装并重启。',
@@ -128,7 +127,6 @@ const I18N = {
     languageChinese: '中文',
     languageEnglish: 'English',
     terminalScrollback: 'Terminal scrollback',
-    defaultWorkingDirectory: 'Default working directory',
     softwareUpdates: 'Software Updates',
     automaticUpdatesEnabled: 'Automatically check for and download updates',
     automaticUpdatesHelp: 'Downloaded updates install when the app exits, or you can install and restart now.',
@@ -901,10 +899,6 @@ async function saveSettings() {
 function populateSettings(config) {
   setLanguage(config.ui?.language);
   setValue('uiLanguage', currentLanguage);
-  setValue(
-    'codexDefaultCwd',
-    config.codex?.configuredDefaultCwd || config.codex?.defaultCwd || ''
-  );
   const feishu = config.plugins?.feishu || {};
   automaticUpdatesCheckbox.checked = config.updates?.automaticEnabled !== false;
   latexRenderingCheckbox.checked = feishu.latexRenderingEnabled !== false;
@@ -926,7 +920,6 @@ function renderFeishuConfiguredState(config) {
 
 function collectSettings(baseConfig) {
   const next = structuredClone(baseConfig);
-  next.codex = next.codex || {};
   next.ui = next.ui || {};
   next.remoteControl = next.remoteControl || {};
   next.updates = next.updates || {};
@@ -935,8 +928,6 @@ function collectSettings(baseConfig) {
 
   next.ui.language = normalizeLanguage(getValue('uiLanguage'));
   next.updates.automaticEnabled = automaticUpdatesCheckbox.checked;
-  next.codex.defaultCwd = getValue('codexDefaultCwd');
-  next.codex.configuredDefaultCwd = next.codex.defaultCwd;
   const feishu = next.plugins.feishu;
   next.remoteControl.autoCreateSession = true;
   next.remoteControl.sendOutput = true;
