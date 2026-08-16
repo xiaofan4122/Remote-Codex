@@ -420,17 +420,20 @@ function locateSubmittedTurn(fsImpl, rolloutPath, options = {}) {
   const tail = readJsonlTail(fsImpl, rolloutPath, options.maxBytes);
   const prompt = String(options.prompt || '');
   const earliest = normalizeStartedAt(options.startedAt) - TURN_START_TOLERANCE_MS;
+  const goalPrompt = parseGoalRolloutPrompt(prompt);
   let matchIndex = -1;
+  let matchedTurnId = '';
 
   for (let index = 0; index < tail.records.length; index += 1) {
     const record = tail.records[index].value;
+    const exactPromptMatch = matchExactRolloutPrompt(record, prompt);
+    const goalMatch = matchGoalRolloutRecord(record, goalPrompt);
     if (
-      record?.type === 'event_msg' &&
-      record.payload?.type === 'user_message' &&
-      String(record.payload?.message || '') === prompt &&
-      timestampMs(record.timestamp) >= earliest
+      timestampMs(record?.timestamp) >= earliest &&
+      (exactPromptMatch || goalMatch)
     ) {
       matchIndex = index;
+      matchedTurnId = String(exactPromptMatch?.turnId || goalMatch?.turnId || '');
       break;
     }
   }
@@ -439,18 +442,22 @@ function locateSubmittedTurn(fsImpl, rolloutPath, options = {}) {
     return { status: 'pending' };
   }
 
-  let startIndex = matchIndex;
-  let turnId = '';
+  let turnId = matchedTurnId;
   let turnCwd = '';
   let cliVersion = '';
   for (let index = matchIndex; index >= 0; index -= 1) {
     const record = tail.records[index].value;
-    if (record?.type === 'turn_context' && !turnCwd) {
+    const recordTurnId = String(record?.payload?.turn_id || '');
+    const belongsToMatchedTurn = !turnId || !recordTurnId || recordTurnId === turnId;
+    if (record?.type === 'turn_context' && !turnCwd && belongsToMatchedTurn) {
       turnCwd = String(record.payload?.cwd || '');
     }
-    if (record?.type === 'event_msg' && record.payload?.type === 'task_started') {
-      startIndex = index;
-      turnId = String(record.payload?.turn_id || '');
+    if (
+      record?.type === 'event_msg' &&
+      record.payload?.type === 'task_started' &&
+      belongsToMatchedTurn
+    ) {
+      if (!turnId) turnId = recordTurnId;
       break;
     }
   }
@@ -476,6 +483,72 @@ function locateSubmittedTurn(fsImpl, rolloutPath, options = {}) {
     endOffset: tail.endOffset,
     partialBuffer: tail.partialBuffer
   };
+}
+
+function matchExactRolloutPrompt(record, prompt) {
+  if (
+    record?.type !== 'response_item' ||
+    record.payload?.type !== 'message' ||
+    record.payload?.role !== 'user' ||
+    responseItemInputText(record) !== prompt
+  ) {
+    return null;
+  }
+  return {
+    turnId: String(
+      record.payload.internal_chat_message_metadata_passthrough?.turn_id || ''
+    )
+  };
+}
+
+function parseGoalRolloutPrompt(prompt) {
+  const match = String(prompt || '').trim().match(/^\/goal(?:\s+([\s\S]+))?$/i);
+  const argument = normalizeGoalObjective(match?.[1]);
+  if (!match || !argument) return null;
+  return {
+    resume: /^resume$/i.test(argument),
+    objective: /^resume$/i.test(argument) ? '' : argument
+  };
+}
+
+function matchGoalRolloutRecord(record, goalPrompt) {
+  if (
+    !goalPrompt ||
+    record?.type !== 'response_item' ||
+    record.payload?.type !== 'message' ||
+    record.payload?.role !== 'user'
+  ) {
+    return null;
+  }
+
+  const inputText = responseItemInputText(record);
+  if (!/<codex_internal_context\b[^>]*\bsource=["']goal["'][^>]*>/i.test(inputText)) {
+    return null;
+  }
+
+  const objectiveMatch = inputText.match(/<objective>\s*([\s\S]*?)\s*<\/objective>/i);
+  if (!objectiveMatch) return null;
+  const objective = normalizeGoalObjective(objectiveMatch[1]);
+  if (!goalPrompt.resume && objective !== goalPrompt.objective) return null;
+
+  return {
+    turnId: String(
+      record.payload.internal_chat_message_metadata_passthrough?.turn_id || ''
+    )
+  };
+}
+
+function responseItemInputText(record) {
+  return Array.isArray(record?.payload?.content)
+    ? record.payload.content
+      .filter((item) => item?.type === 'input_text')
+      .map((item) => String(item.text || ''))
+      .join('\n')
+    : '';
+}
+
+function normalizeGoalObjective(value) {
+  return String(value || '').replace(/\r\n?/g, '\n').trim();
 }
 
 function readJsonlTail(fsImpl, filePath, maxBytes = DEFAULT_INITIAL_TAIL_BYTES) {

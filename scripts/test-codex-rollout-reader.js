@@ -13,6 +13,9 @@ const {
 
 async function main() {
   await testBindsNextUnknownPrompt();
+  await testBindsCodex0147ResponseItemUserPrompt();
+  await testGoalCommandBindsStructuredGoalTurn();
+  await testGoalResumeBindsNextStructuredGoalTurn();
   await testIncrementalRolloutEventsAreSemanticAndOrdered();
   await testAuthorizationEventsComeFromStructuredRolloutRecords();
   await testResumeAppendsWithoutReplayingPreviousTurns();
@@ -20,6 +23,177 @@ async function main() {
   await testQueuedIdenticalPromptsBindInOrder();
   await testNextTaskBoundaryCannotLeakIntoBoundTurn();
   console.log('Codex rollout reader tests passed.');
+}
+
+async function testBindsCodex0147ResponseItemUserPrompt() {
+  const fixture = createFixture();
+  const startedAt = Date.now();
+  const prompt = '检查新版本 rollout 绑定';
+  const turnId = 'turn-codex-0147';
+  const events = [];
+  const errors = [];
+  const reader = createReader(fixture.codexHome);
+  reader.beginTurn({
+    prompt,
+    cwd: fixture.cwd,
+    startedAt,
+    onEvent: (event) => events.push(event),
+    onError: (error) => errors.push(error)
+  });
+
+  appendJson(fixture.historyPath, {
+    session_id: fixture.sessionId,
+    ts: startedAt / 1000,
+    text: prompt
+  });
+  appendRollout(fixture.rolloutPath, [
+    event('event_msg', { type: 'task_started', turn_id: turnId }),
+    event('response_item', {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: '<environment_context>fixture</environment_context>' }],
+      internal_chat_message_metadata_passthrough: { turn_id: turnId }
+    }),
+    event('turn_context', { turn_id: turnId, cwd: fixture.cwd }),
+    responseItemUserMessage(turnId, prompt),
+    event('event_msg', {
+      type: 'agent_message',
+      phase: 'final_answer',
+      message: '新格式绑定成功。'
+    }),
+    event('event_msg', {
+      type: 'task_complete',
+      turn_id: turnId,
+      last_agent_message: '新格式绑定成功。'
+    })
+  ]);
+
+  await waitUntil(() => (
+    events.some((entry) => entry.type === 'turn_complete') || errors.length > 0
+  ));
+  assert.deepEqual(errors, []);
+  assert.equal(events.find((entry) => entry.type === 'bound').turnId, turnId);
+  assert.equal(events.find((entry) => entry.type === 'final').text, '新格式绑定成功。');
+  reader.stopAll();
+}
+
+async function testGoalCommandBindsStructuredGoalTurn() {
+  const fixture = createFixture();
+  const startedAt = Date.now();
+  const command = '/goal 将 IMU 策略移植到 Elevator-LIO';
+  const objective = '将 IMU 策略移植到 Elevator-LIO';
+  const turnId = 'turn-goal-create';
+  const events = [];
+  const reader = createReader(fixture.codexHome);
+  reader.beginTurn({
+    prompt: 'local terminal placeholder',
+    matchNextPrompt: true,
+    cwd: fixture.cwd,
+    startedAt,
+    onEvent: (event) => events.push(event),
+    onError: (error) => {
+      throw error;
+    }
+  });
+
+  appendJson(fixture.historyPath, {
+    session_id: fixture.sessionId,
+    ts: startedAt / 1000,
+    text: command
+  });
+  appendRollout(fixture.rolloutPath, [
+    event('event_msg', { type: 'task_started', turn_id: turnId }),
+    event('turn_context', { turn_id: turnId, cwd: fixture.cwd }),
+    goalContextEvent(turnId, objective),
+    event('event_msg', {
+      type: 'agent_message',
+      phase: 'commentary',
+      message: '已经从 goal 结构化记录绑定当前任务。'
+    }),
+    event('event_msg', {
+      type: 'agent_message',
+      phase: 'final_answer',
+      message: 'Goal 任务处理完成。'
+    }),
+    event('event_msg', {
+      type: 'task_complete',
+      turn_id: turnId,
+      last_agent_message: 'Goal 任务处理完成。'
+    })
+  ]);
+
+  await waitUntil(() => events.some((entry) => entry.type === 'turn_complete'));
+  assert.equal(events.find((entry) => entry.type === 'bound').prompt, command);
+  assert.equal(events.find((entry) => entry.type === 'bound').turnId, turnId);
+  assert.equal(
+    events.find((entry) => entry.type === 'progress').text,
+    '已经从 goal 结构化记录绑定当前任务。'
+  );
+  assert.equal(events.find((entry) => entry.type === 'final').text, 'Goal 任务处理完成。');
+  reader.stopAll();
+}
+
+async function testGoalResumeBindsNextStructuredGoalTurn() {
+  const fixture = createFixture();
+  const startedAt = Date.now();
+  const oldAt = new Date(startedAt - 1000).toISOString();
+  const turnId = 'turn-goal-resume';
+  const events = [];
+  appendRollout(fixture.rolloutPath, [
+    eventAt(oldAt, 'event_msg', { type: 'task_started', turn_id: 'turn-old-goal' }),
+    eventAt(oldAt, 'turn_context', { turn_id: 'turn-old-goal', cwd: fixture.cwd }),
+    goalContextEvent('turn-old-goal', '不应重放的旧 goal', oldAt),
+    eventAt(oldAt, 'event_msg', {
+      type: 'agent_message',
+      phase: 'final_answer',
+      message: '不应重放的旧 goal 答案'
+    }),
+    eventAt(oldAt, 'event_msg', {
+      type: 'task_complete',
+      turn_id: 'turn-old-goal',
+      last_agent_message: '不应重放的旧 goal 答案'
+    })
+  ]);
+
+  const reader = createReader(fixture.codexHome);
+  reader.beginTurn({
+    prompt: '/goal resume',
+    cwd: fixture.cwd,
+    startedAt,
+    onEvent: (event) => events.push(event),
+    onError: (error) => {
+      throw error;
+    }
+  });
+  appendJson(fixture.historyPath, {
+    session_id: fixture.sessionId,
+    ts: startedAt / 1000,
+    text: '/goal resume'
+  });
+  appendRollout(fixture.rolloutPath, [
+    event('event_msg', { type: 'task_started', turn_id: turnId }),
+    event('turn_context', { turn_id: turnId, cwd: fixture.cwd }),
+    goalContextEvent(turnId, '继续执行的 goal'),
+    event('event_msg', {
+      type: 'agent_message',
+      phase: 'final_answer',
+      message: '只返回当前 goal 续执的答案。'
+    }),
+    event('event_msg', {
+      type: 'task_complete',
+      turn_id: turnId,
+      last_agent_message: '只返回当前 goal 续执的答案。'
+    })
+  ]);
+
+  await waitUntil(() => events.some((entry) => entry.type === 'turn_complete'));
+  assert.equal(events.find((entry) => entry.type === 'bound').turnId, turnId);
+  assert.equal(
+    events.find((entry) => entry.type === 'final').text,
+    '只返回当前 goal 续执的答案。'
+  );
+  assert.doesNotMatch(JSON.stringify(events), /不应重放/);
+  reader.stopAll();
 }
 
 async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
@@ -52,7 +226,7 @@ async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
   appendRollout(fixture.rolloutPath, [
     event('event_msg', { type: 'task_started', turn_id: turnId }),
     event('turn_context', { turn_id: turnId, cwd: fixture.cwd }),
-    event('event_msg', { type: 'user_message', message: prompt })
+    responseItemUserMessage(turnId, prompt)
   ]);
   await waitUntil(() => events.some((entry) => entry.type === 'bound'));
 
@@ -269,7 +443,9 @@ async function testBindsNextUnknownPrompt() {
   const fixture = createFixture();
   const events = [];
   const reader = createReader(fixture.codexHome);
+  const terminalNoise = '\u001b]10;rgb:e8e8/eded/f2f2\u001b\\'.repeat(6);
   reader.beginTurn({
+    prompt: terminalNoise,
     matchNextPrompt: true,
     cwd: fixture.cwd,
     startedAt: Date.now() - 1000,
@@ -283,13 +459,14 @@ async function testBindsNextUnknownPrompt() {
     text: prompt
   });
   appendJson(fixture.rolloutPath, event('event_msg', {
-    type: 'user_message',
-    message: prompt
-  }));
-  appendJson(fixture.rolloutPath, event('event_msg', {
     type: 'task_started',
     turn_id: 'turn-next'
   }));
+  appendJson(fixture.rolloutPath, event('turn_context', {
+    turn_id: 'turn-next',
+    cwd: fixture.cwd
+  }));
+  appendJson(fixture.rolloutPath, responseItemUserMessage('turn-next', prompt));
   appendJson(fixture.rolloutPath, event('event_msg', {
     type: 'agent_message',
     phase: 'final_answer',
@@ -303,6 +480,11 @@ async function testBindsNextUnknownPrompt() {
 
   await waitUntil(() => events.some((entry) => entry.type === 'turn_complete'));
   assert.equal(events.find((entry) => entry.type === 'bound').prompt, prompt);
+  assert.doesNotMatch(
+    JSON.stringify(events),
+    /rgb:e8e8|\]10;/,
+    'matchNextPrompt must replace terminal input noise with history.jsonl text'
+  );
   assert.equal(events.find((entry) => entry.type === 'final').text, 'Review completed.');
   reader.stopAll();
 }
@@ -354,10 +536,11 @@ async function testQueuedIdenticalPromptsBindInOrder() {
       turn_id: 'turn-queued-first',
       cwd: fixture.cwd
     }),
-    eventAt(new Date(firstAt).toISOString(), 'event_msg', {
-      type: 'user_message',
-      message: prompt
-    }),
+    responseItemUserMessage(
+      'turn-queued-first',
+      prompt,
+      new Date(firstAt).toISOString()
+    ),
     eventAt(new Date(firstAt).toISOString(), 'event_msg', {
       type: 'agent_message',
       phase: 'final_answer',
@@ -376,10 +559,11 @@ async function testQueuedIdenticalPromptsBindInOrder() {
       turn_id: 'turn-queued-second',
       cwd: fixture.cwd
     }),
-    eventAt(new Date(secondAt).toISOString(), 'event_msg', {
-      type: 'user_message',
-      message: prompt
-    }),
+    responseItemUserMessage(
+      'turn-queued-second',
+      prompt,
+      new Date(secondAt).toISOString()
+    ),
     eventAt(new Date(secondAt).toISOString(), 'event_msg', {
       type: 'agent_message',
       phase: 'final_answer',
@@ -424,7 +608,7 @@ async function testNextTaskBoundaryCannotLeakIntoBoundTurn() {
   appendRollout(fixture.rolloutPath, [
     event('event_msg', { type: 'task_started', turn_id: 'turn-incomplete' }),
     event('turn_context', { turn_id: 'turn-incomplete', cwd: fixture.cwd }),
-    event('event_msg', { type: 'user_message', message: prompt })
+    responseItemUserMessage('turn-incomplete', prompt)
   ]);
   await waitUntil(() => events.some((event) => event.type === 'bound'));
 
@@ -452,7 +636,7 @@ async function testRecentIdenticalPromptDoesNotBindPreviousTurn() {
   appendRollout(fixture.rolloutPath, [
     eventAt(oldAt, 'event_msg', { type: 'task_started', turn_id: 'turn-recent-old' }),
     eventAt(oldAt, 'turn_context', { turn_id: 'turn-recent-old', cwd: fixture.cwd }),
-    eventAt(oldAt, 'event_msg', { type: 'user_message', message: prompt }),
+    responseItemUserMessage('turn-recent-old', prompt, oldAt),
     eventAt(oldAt, 'event_msg', {
       type: 'agent_message',
       phase: 'final_answer',
@@ -484,7 +668,7 @@ async function testRecentIdenticalPromptDoesNotBindPreviousTurn() {
   appendRollout(fixture.rolloutPath, [
     event('event_msg', { type: 'task_started', turn_id: 'turn-current-repeat' }),
     event('turn_context', { turn_id: 'turn-current-repeat', cwd: fixture.cwd }),
-    event('event_msg', { type: 'user_message', message: prompt }),
+    responseItemUserMessage('turn-current-repeat', prompt),
     event('event_msg', {
       type: 'agent_message',
       phase: 'final_answer',
@@ -527,7 +711,7 @@ async function testIncrementalRolloutEventsAreSemanticAndOrdered() {
   appendRollout(fixture.rolloutPath, [
     event('event_msg', { type: 'task_started', turn_id: turnId }),
     event('turn_context', { turn_id: turnId, cwd: fixture.cwd }),
-    event('event_msg', { type: 'user_message', message: prompt })
+    responseItemUserMessage(turnId, prompt)
   ]);
 
   await waitUntil(() => events.some((event) => event.type === 'bound'));
@@ -622,7 +806,7 @@ async function testResumeAppendsWithoutReplayingPreviousTurns() {
   appendRollout(fixture.rolloutPath, [
     eventAt(oldAt, 'event_msg', { type: 'task_started', turn_id: 'turn-old' }),
     eventAt(oldAt, 'turn_context', { turn_id: 'turn-old', cwd: fixture.cwd }),
-    eventAt(oldAt, 'event_msg', { type: 'user_message', message: firstPrompt }),
+    responseItemUserMessage('turn-old', firstPrompt, oldAt),
     eventAt(oldAt, 'event_msg', {
       type: 'agent_message',
       phase: 'commentary',
@@ -663,7 +847,7 @@ async function testResumeAppendsWithoutReplayingPreviousTurns() {
   appendRollout(fixture.rolloutPath, [
     event('event_msg', { type: 'task_started', turn_id: 'turn-new' }),
     event('turn_context', { turn_id: 'turn-new', cwd: fixture.cwd }),
-    event('event_msg', { type: 'user_message', message: prompt }),
+    responseItemUserMessage('turn-new', prompt),
     event('event_msg', {
       type: 'agent_message',
       phase: 'commentary',
@@ -709,7 +893,7 @@ function createFixture() {
     payload: {
       id: sessionId,
       cwd,
-      cli_version: '0.142.5',
+      cli_version: '0.147.0',
       source: 'cli',
       originator: 'codex-tui'
     }
@@ -744,6 +928,36 @@ function event(type, payload) {
 
 function eventAt(timestamp, type, payload) {
   return { timestamp, type, payload };
+}
+
+function goalContextEvent(turnId, objective, timestamp = new Date().toISOString()) {
+  return eventAt(timestamp, 'response_item', {
+    type: 'message',
+    role: 'user',
+    content: [{
+      type: 'input_text',
+      text: [
+        '<codex_internal_context source="goal">',
+        'Continue working toward the active thread goal.',
+        '',
+        '<objective>',
+        objective,
+        '</objective>',
+        '',
+        '</codex_internal_context>'
+      ].join('\n')
+    }],
+    internal_chat_message_metadata_passthrough: { turn_id: turnId }
+  });
+}
+
+function responseItemUserMessage(turnId, text, timestamp = new Date().toISOString()) {
+  return eventAt(timestamp, 'response_item', {
+    type: 'message',
+    role: 'user',
+    content: [{ type: 'input_text', text }],
+    internal_chat_message_metadata_passthrough: { turn_id: turnId }
+  });
 }
 
 async function waitUntil(predicate, timeoutMs = 1500) {
