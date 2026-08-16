@@ -200,7 +200,10 @@ async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
   fs.mkdirSync(rulesDir, { recursive: true });
   fs.writeFileSync(
     path.join(rulesDir, 'default.rules'),
-    'prefix_rule(pattern=["git", "tag"], decision="allow")\n'
+    [
+      'prefix_rule(pattern=["git", "tag"], decision="allow")',
+      'prefix_rule(pattern=["lark-cli", "apps"], decision="allow")'
+    ].join('\n') + '\n'
   );
   const prompt = '连续执行两个需要授权的操作';
   const startedAt = Date.now();
@@ -288,6 +291,20 @@ async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
     ].join(',') + '}); text(r.output);\n',
     internal_chat_message_metadata_passthrough: { turn_id: turnId }
   });
+  const envPrefixedRequest = event('response_item', {
+    type: 'custom_tool_call',
+    name: 'exec',
+    call_id: 'call-env-prefixed-authorization',
+    input: 'const r = await tools.exec_command({' + [
+      '"cmd":"LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1 LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1 lark-cli apps +create --name \\\"轻松小游戏\\\""',
+      `"workdir":${JSON.stringify(fixture.cwd)}`,
+      '"yield_time_ms":30000',
+      '"sandbox_permissions":"require_escalated"',
+      '"justification":"是否允许连接飞书妙搭服务，创建并发布这个小游戏？"',
+      '"prefix_rule":["lark-cli","apps"]'
+    ].join(',') + '}); text(JSON.stringify(r));\n',
+    internal_chat_message_metadata_passthrough: { turn_id: turnId }
+  });
   appendRollout(fixture.rolloutPath, [
     firstRequest,
     firstRequest,
@@ -319,6 +336,12 @@ async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
       call_id: 'call-authorization-second',
       output: [{ type: 'input_text', text: 'ok' }]
     }),
+    envPrefixedRequest,
+    event('response_item', {
+      type: 'custom_tool_call_output',
+      call_id: 'call-env-prefixed-authorization',
+      output: 'aborted by user after 61.1s'
+    }),
     jsonSerializedRequest,
     event('response_item', {
       type: 'custom_tool_call_output',
@@ -341,6 +364,7 @@ async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
     [
       'call-authorization-first',
       'call-authorization-second',
+      'call-env-prefixed-authorization',
       'call-authorization-json-properties'
     ]
   );
@@ -351,6 +375,7 @@ async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
     [
       'call-authorization-first',
       'call-authorization-second',
+      'call-env-prefixed-authorization',
       'call-authorization-json-properties'
     ]
   );
@@ -372,11 +397,24 @@ async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
   );
   assert.equal(
     approvals[2].command,
-    '.venv-demo/bin/python -m pip install gradio==5.17.1 einops'
+    'LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1 LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1 lark-cli apps +create --name "轻松小游戏"'
   );
-  assert.equal(approvals[2].reason, 'Reason: 是否允许联网下载缺失依赖？');
+  assert.equal(
+    approvals[2].reason,
+    'Reason: 是否允许连接飞书妙搭服务，创建并发布这个小游戏？'
+  );
   assert.deepEqual(
     approvals[2].options.map((option) => option.action),
+    ['approve', 'approve_persistent', 'deny'],
+    'an environment-prefixed command still needs authorization when Codex does not apply the stored command prefix'
+  );
+  assert.equal(
+    approvals[3].command,
+    '.venv-demo/bin/python -m pip install gradio==5.17.1 einops'
+  );
+  assert.equal(approvals[3].reason, 'Reason: 是否允许联网下载缺失依赖？');
+  assert.deepEqual(
+    approvals[3].options.map((option) => option.action),
     ['approve', 'approve_persistent', 'deny'],
     'a reusable prefix rule enables the persistent approval option'
   );

@@ -849,7 +849,7 @@ function filterAutomaticallyAllowedAuthorization(approval, allowedPrefixes) {
   const requests = Array.isArray(approval?.requests) ? approval.requests : [];
   if (requests.length === 0 || !Array.isArray(allowedPrefixes)) return approval;
   const pending = requests.filter((request) => (
-    !isAllowedExecPrefix(request.prefixRule, allowedPrefixes)
+    !isAutomaticallyAllowedExecRequest(request, allowedPrefixes)
   ));
   if (pending.length === requests.length) return approval;
   if (pending.length === 0) return null;
@@ -860,13 +860,78 @@ function filterAutomaticallyAllowedAuthorization(approval, allowedPrefixes) {
   });
 }
 
-function isAllowedExecPrefix(prefixRule, allowedPrefixes) {
+function isAutomaticallyAllowedExecRequest(request, allowedPrefixes) {
+  const prefixRule = request?.prefixRule;
   if (!Array.isArray(prefixRule) || prefixRule.length === 0) return false;
   return allowedPrefixes.some((allowed) => (
     Array.isArray(allowed) &&
     allowed.length <= prefixRule.length &&
-    allowed.every((token, index) => token === prefixRule[index])
+    allowed.every((token, index) => token === prefixRule[index]) &&
+    commandStartsWithExecPrefix(request?.command, allowed)
   ));
+}
+
+function commandStartsWithExecPrefix(command, prefix) {
+  if (!Array.isArray(prefix) || prefix.length === 0) return false;
+  const words = readLeadingStaticShellWords(command, prefix.length);
+  return words.length === prefix.length && prefix.every((token, index) => (
+    String(token) === words[index]
+  ));
+}
+
+function readLeadingStaticShellWords(command, limit) {
+  const source = String(command || '');
+  const words = [];
+  let cursor = 0;
+  while (words.length < limit) {
+    while (/\s/.test(source[cursor] || '')) cursor += 1;
+    if (cursor >= source.length || /[|&;()<>]/.test(source[cursor])) return words;
+    let word = '';
+    let consumed = false;
+    while (cursor < source.length && !/\s/.test(source[cursor])) {
+      const char = source[cursor];
+      if (/[|&;()<>]/.test(char) || char === '$' || char === '`') return [];
+      if (char === "'") {
+        const end = source.indexOf("'", cursor + 1);
+        if (end < 0) return [];
+        word += source.slice(cursor + 1, end);
+        cursor = end + 1;
+        consumed = true;
+        continue;
+      }
+      if (char === '"') {
+        cursor += 1;
+        let closed = false;
+        while (cursor < source.length) {
+          if (source[cursor] === '"') {
+            cursor += 1;
+            closed = true;
+            break;
+          }
+          if (source[cursor] === '$' || source[cursor] === '`') return [];
+          if (source[cursor] === '\\') {
+            cursor += 1;
+            if (cursor >= source.length) return [];
+          }
+          word += source[cursor];
+          cursor += 1;
+        }
+        if (!closed) return [];
+        consumed = true;
+        continue;
+      }
+      if (char === '\\') {
+        cursor += 1;
+        if (cursor >= source.length) return [];
+      }
+      word += source[cursor];
+      cursor += 1;
+      consumed = true;
+    }
+    if (!consumed) return words;
+    words.push(word);
+  }
+  return words;
 }
 
 function findCallObjectLiterals(source, callee) {
