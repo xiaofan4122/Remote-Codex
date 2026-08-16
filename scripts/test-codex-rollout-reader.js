@@ -56,11 +56,8 @@ async function testBindsCodex0147ResponseItemUserPrompt() {
     }),
     event('turn_context', { turn_id: turnId, cwd: fixture.cwd }),
     responseItemUserMessage(turnId, prompt),
-    event('event_msg', {
-      type: 'agent_message',
-      phase: 'final_answer',
-      message: '新格式绑定成功。'
-    }),
+    responseItemAssistantMessage(turnId, 'commentary', '正在处理新格式任务。'),
+    responseItemAssistantMessage(turnId, 'final_answer', '新格式绑定成功。'),
     event('event_msg', {
       type: 'task_complete',
       turn_id: turnId,
@@ -73,6 +70,10 @@ async function testBindsCodex0147ResponseItemUserPrompt() {
   ));
   assert.deepEqual(errors, []);
   assert.equal(events.find((entry) => entry.type === 'bound').turnId, turnId);
+  assert.equal(
+    events.find((entry) => entry.type === 'progress').text,
+    '正在处理新格式任务。'
+  );
   assert.equal(events.find((entry) => entry.type === 'final').text, '新格式绑定成功。');
   reader.stopAll();
 }
@@ -105,16 +106,12 @@ async function testGoalCommandBindsStructuredGoalTurn() {
     event('event_msg', { type: 'task_started', turn_id: turnId }),
     event('turn_context', { turn_id: turnId, cwd: fixture.cwd }),
     goalContextEvent(turnId, objective),
-    event('event_msg', {
-      type: 'agent_message',
-      phase: 'commentary',
-      message: '已经从 goal 结构化记录绑定当前任务。'
-    }),
-    event('event_msg', {
-      type: 'agent_message',
-      phase: 'final_answer',
-      message: 'Goal 任务处理完成。'
-    }),
+    responseItemAssistantMessage(
+      turnId,
+      'commentary',
+      '已经从 goal 结构化记录绑定当前任务。'
+    ),
+    responseItemAssistantMessage(turnId, 'final_answer', 'Goal 任务处理完成。'),
     event('event_msg', {
       type: 'task_complete',
       turn_id: turnId,
@@ -143,11 +140,12 @@ async function testGoalResumeBindsNextStructuredGoalTurn() {
     eventAt(oldAt, 'event_msg', { type: 'task_started', turn_id: 'turn-old-goal' }),
     eventAt(oldAt, 'turn_context', { turn_id: 'turn-old-goal', cwd: fixture.cwd }),
     goalContextEvent('turn-old-goal', '不应重放的旧 goal', oldAt),
-    eventAt(oldAt, 'event_msg', {
-      type: 'agent_message',
-      phase: 'final_answer',
-      message: '不应重放的旧 goal 答案'
-    }),
+    responseItemAssistantMessage(
+      'turn-old-goal',
+      'final_answer',
+      '不应重放的旧 goal 答案',
+      oldAt
+    ),
     eventAt(oldAt, 'event_msg', {
       type: 'task_complete',
       turn_id: 'turn-old-goal',
@@ -174,11 +172,11 @@ async function testGoalResumeBindsNextStructuredGoalTurn() {
     event('event_msg', { type: 'task_started', turn_id: turnId }),
     event('turn_context', { turn_id: turnId, cwd: fixture.cwd }),
     goalContextEvent(turnId, '继续执行的 goal'),
-    event('event_msg', {
-      type: 'agent_message',
-      phase: 'final_answer',
-      message: '只返回当前 goal 续执的答案。'
-    }),
+    responseItemAssistantMessage(
+      turnId,
+      'final_answer',
+      '只返回当前 goal 续执的答案。'
+    ),
     event('event_msg', {
       type: 'task_complete',
       turn_id: turnId,
@@ -327,11 +325,7 @@ async function testAuthorizationEventsComeFromStructuredRolloutRecords() {
       call_id: 'call-authorization-json-properties',
       output: [{ type: 'input_text', text: 'ok' }]
     }),
-    event('event_msg', {
-      type: 'agent_message',
-      phase: 'final_answer',
-      message: '两个操作均已处理。'
-    }),
+    responseItemAssistantMessage(turnId, 'final_answer', '两个操作均已处理。'),
     event('event_msg', {
       type: 'task_complete',
       turn_id: turnId,
@@ -467,11 +461,10 @@ async function testBindsNextUnknownPrompt() {
     cwd: fixture.cwd
   }));
   appendJson(fixture.rolloutPath, responseItemUserMessage('turn-next', prompt));
-  appendJson(fixture.rolloutPath, event('event_msg', {
-    type: 'agent_message',
-    phase: 'final_answer',
-    message: 'Review completed.'
-  }));
+  appendJson(
+    fixture.rolloutPath,
+    responseItemAssistantMessage('turn-next', 'final_answer', 'Review completed.')
+  );
   appendJson(fixture.rolloutPath, event('event_msg', {
     type: 'task_complete',
     turn_id: 'turn-next',
@@ -541,11 +534,12 @@ async function testQueuedIdenticalPromptsBindInOrder() {
       prompt,
       new Date(firstAt).toISOString()
     ),
-    eventAt(new Date(firstAt).toISOString(), 'event_msg', {
-      type: 'agent_message',
-      phase: 'final_answer',
-      message: '第一个排队答案'
-    }),
+    responseItemAssistantMessage(
+      'turn-queued-first',
+      'final_answer',
+      '第一个排队答案',
+      new Date(firstAt).toISOString()
+    ),
     eventAt(new Date(firstAt).toISOString(), 'event_msg', {
       type: 'task_complete',
       turn_id: 'turn-queued-first',
@@ -564,11 +558,12 @@ async function testQueuedIdenticalPromptsBindInOrder() {
       prompt,
       new Date(secondAt).toISOString()
     ),
-    eventAt(new Date(secondAt).toISOString(), 'event_msg', {
-      type: 'agent_message',
-      phase: 'final_answer',
-      message: '第二个排队答案'
-    }),
+    responseItemAssistantMessage(
+      'turn-queued-second',
+      'final_answer',
+      '第二个排队答案',
+      new Date(secondAt).toISOString()
+    ),
     eventAt(new Date(secondAt).toISOString(), 'event_msg', {
       type: 'task_complete',
       turn_id: 'turn-queued-second',
@@ -614,11 +609,11 @@ async function testNextTaskBoundaryCannotLeakIntoBoundTurn() {
 
   appendRollout(fixture.rolloutPath, [
     event('event_msg', { type: 'task_started', turn_id: 'turn-next' }),
-    event('event_msg', {
-      type: 'agent_message',
-      phase: 'final_answer',
-      message: '下一任务的内容绝不能泄漏'
-    })
+    responseItemAssistantMessage(
+      'turn-next',
+      'final_answer',
+      '下一任务的内容绝不能泄漏'
+    )
   ]);
   await waitUntil(() => errors.length === 1);
   assert.match(errors[0].message, /new rollout task started/i);
@@ -637,11 +632,12 @@ async function testRecentIdenticalPromptDoesNotBindPreviousTurn() {
     eventAt(oldAt, 'event_msg', { type: 'task_started', turn_id: 'turn-recent-old' }),
     eventAt(oldAt, 'turn_context', { turn_id: 'turn-recent-old', cwd: fixture.cwd }),
     responseItemUserMessage('turn-recent-old', prompt, oldAt),
-    eventAt(oldAt, 'event_msg', {
-      type: 'agent_message',
-      phase: 'final_answer',
-      message: '不应绑定的最近旧答案'
-    }),
+    responseItemAssistantMessage(
+      'turn-recent-old',
+      'final_answer',
+      '不应绑定的最近旧答案',
+      oldAt
+    ),
     eventAt(oldAt, 'event_msg', {
       type: 'task_complete',
       turn_id: 'turn-recent-old',
@@ -669,11 +665,11 @@ async function testRecentIdenticalPromptDoesNotBindPreviousTurn() {
     event('event_msg', { type: 'task_started', turn_id: 'turn-current-repeat' }),
     event('turn_context', { turn_id: 'turn-current-repeat', cwd: fixture.cwd }),
     responseItemUserMessage('turn-current-repeat', prompt),
-    event('event_msg', {
-      type: 'agent_message',
-      phase: 'final_answer',
-      message: '当前重复任务答案'
-    }),
+    responseItemAssistantMessage(
+      'turn-current-repeat',
+      'final_answer',
+      '当前重复任务答案'
+    ),
     event('event_msg', {
       type: 'task_complete',
       turn_id: 'turn-current-repeat',
@@ -718,25 +714,16 @@ async function testIncrementalRolloutEventsAreSemanticAndOrdered() {
 
   const first = '第一段来自 commentary，不经过终端解析。';
   const second = '第二段保留换行：\n\n- 项目文件：69\n- 代码行数：23,212';
+  const firstRecord = responseItemAssistantMessage(turnId, 'commentary', first);
+  firstRecord.payload.id = 'message-commentary-first';
   appendRollout(fixture.rolloutPath, [
-    event('event_msg', {
-      type: 'agent_message',
-      phase: 'commentary',
-      message: first
-    }),
-    event('response_item', {
-      type: 'message',
-      role: 'assistant',
-      phase: 'commentary',
-      content: [{ type: 'output_text', text: first }]
-    })
+    firstRecord,
+    firstRecord
   ]);
 
-  const partialRecord = Buffer.from(JSON.stringify(event('event_msg', {
-    type: 'agent_message',
-    phase: 'commentary',
-    message: second
-  })), 'utf8');
+  const partialRecord = Buffer.from(JSON.stringify(
+    responseItemAssistantMessage(turnId, 'commentary', second)
+  ), 'utf8');
   const chineseStart = partialRecord.indexOf(Buffer.from('第二', 'utf8'));
   const splitAt = chineseStart + 1;
   fs.appendFileSync(fixture.rolloutPath, partialRecord.subarray(0, splitAt));
@@ -759,17 +746,7 @@ async function testIncrementalRolloutEventsAreSemanticAndOrdered() {
     '```'
   ].join('\n');
   appendRollout(fixture.rolloutPath, [
-    event('event_msg', {
-      type: 'agent_message',
-      phase: 'final_answer',
-      message: finalText
-    }),
-    event('response_item', {
-      type: 'message',
-      role: 'assistant',
-      phase: 'final_answer',
-      content: [{ type: 'output_text', text: finalText }]
-    }),
+    responseItemAssistantMessage(turnId, 'final_answer', finalText),
     event('event_msg', {
       type: 'task_complete',
       turn_id: turnId,
@@ -807,16 +784,8 @@ async function testResumeAppendsWithoutReplayingPreviousTurns() {
     eventAt(oldAt, 'event_msg', { type: 'task_started', turn_id: 'turn-old' }),
     eventAt(oldAt, 'turn_context', { turn_id: 'turn-old', cwd: fixture.cwd }),
     responseItemUserMessage('turn-old', firstPrompt, oldAt),
-    eventAt(oldAt, 'event_msg', {
-      type: 'agent_message',
-      phase: 'commentary',
-      message: firstProgress
-    }),
-    eventAt(oldAt, 'event_msg', {
-      type: 'agent_message',
-      phase: 'final_answer',
-      message: firstFinal
-    }),
+    responseItemAssistantMessage('turn-old', 'commentary', firstProgress, oldAt),
+    responseItemAssistantMessage('turn-old', 'final_answer', firstFinal, oldAt),
     eventAt(oldAt, 'event_msg', {
       type: 'task_complete',
       turn_id: 'turn-old',
@@ -848,16 +817,8 @@ async function testResumeAppendsWithoutReplayingPreviousTurns() {
     event('event_msg', { type: 'task_started', turn_id: 'turn-new' }),
     event('turn_context', { turn_id: 'turn-new', cwd: fixture.cwd }),
     responseItemUserMessage('turn-new', prompt),
-    event('event_msg', {
-      type: 'agent_message',
-      phase: 'commentary',
-      message: progress
-    }),
-    event('event_msg', {
-      type: 'agent_message',
-      phase: 'final_answer',
-      message: finalText
-    }),
+    responseItemAssistantMessage('turn-new', 'commentary', progress),
+    responseItemAssistantMessage('turn-new', 'final_answer', finalText),
     event('event_msg', {
       type: 'task_complete',
       turn_id: 'turn-new',
@@ -956,6 +917,21 @@ function responseItemUserMessage(turnId, text, timestamp = new Date().toISOStrin
     type: 'message',
     role: 'user',
     content: [{ type: 'input_text', text }],
+    internal_chat_message_metadata_passthrough: { turn_id: turnId }
+  });
+}
+
+function responseItemAssistantMessage(
+  turnId,
+  phase,
+  text,
+  timestamp = new Date().toISOString()
+) {
+  return eventAt(timestamp, 'response_item', {
+    type: 'message',
+    role: 'assistant',
+    phase,
+    content: [{ type: 'output_text', text }],
     internal_chat_message_metadata_passthrough: { turn_id: turnId }
   });
 }

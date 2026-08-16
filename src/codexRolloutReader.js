@@ -138,6 +138,7 @@ class CodexRolloutTurn {
     this.finalText = '';
     this.authorizationRequests = new Map();
     this.authorizationCompletions = new Set();
+    this.responseMessageSignatures = new Set();
     this.bound = false;
     this.completed = false;
     this.stopped = false;
@@ -295,30 +296,6 @@ class CodexRolloutTurn {
       return;
     }
 
-    if (payload.type === 'agent_message') {
-      const text = normalizeRolloutMessage(payload.message);
-      if (!text) return;
-      if (payload.phase === 'commentary') {
-        this.emitEvent({
-          type: 'progress',
-          sessionId: this.sessionId,
-          turnId: this.turnId,
-          text,
-          timestamp: record.timestamp || ''
-        });
-      } else if (payload.phase === 'final_answer') {
-        this.finalText = text;
-        this.emitEvent({
-          type: 'final',
-          sessionId: this.sessionId,
-          turnId: this.turnId,
-          text,
-          timestamp: record.timestamp || ''
-        });
-      }
-      return;
-    }
-
     if (payload.type !== 'task_complete') return;
     const completedTurnId = String(payload.turn_id || '');
     if (this.turnId && completedTurnId && completedTurnId !== this.turnId) return;
@@ -339,6 +316,40 @@ class CodexRolloutTurn {
 
   consumeResponseItem(record) {
     const payload = record.payload || {};
+    if (payload.type === 'message' && payload.role === 'assistant') {
+      const phase = String(payload.phase || '');
+      if (phase !== 'commentary' && phase !== 'final_answer') return;
+      const messageTurnId = String(
+        payload.internal_chat_message_metadata_passthrough?.turn_id || ''
+      );
+      if (this.turnId && messageTurnId && messageTurnId !== this.turnId) return;
+      const text = normalizeRolloutMessage(responseItemOutputText(payload));
+      if (!text) return;
+      const signature =
+        String(payload.id || '') || `${messageTurnId}\u0000${phase}\u0000${text}`;
+      if (this.responseMessageSignatures.has(signature)) return;
+      this.responseMessageSignatures.add(signature);
+      if (phase === 'commentary') {
+        this.emitEvent({
+          type: 'progress',
+          sessionId: this.sessionId,
+          turnId: messageTurnId || this.turnId,
+          text,
+          timestamp: record.timestamp || ''
+        });
+      } else {
+        this.finalText = text;
+        this.emitEvent({
+          type: 'final',
+          sessionId: this.sessionId,
+          turnId: messageTurnId || this.turnId,
+          text,
+          timestamp: record.timestamp || ''
+        });
+      }
+      return;
+    }
+
     if (payload.type === 'custom_tool_call') {
       let approval = parseRolloutAuthorizationRequest(payload);
       if (!approval) return;
@@ -676,6 +687,15 @@ function normalizeRolloutMessage(value) {
     .replace(/\r\n?/g, '\n')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/^\n+|\n+$/g, '');
+}
+
+function responseItemOutputText(payload) {
+  return Array.isArray(payload?.content)
+    ? payload.content
+      .filter((item) => item?.type === 'output_text')
+      .map((item) => String(item.text || ''))
+      .join('\n')
+    : '';
 }
 
 function parseRolloutAuthorizationRequest(payload = {}) {
